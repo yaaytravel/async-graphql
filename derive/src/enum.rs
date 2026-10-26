@@ -230,6 +230,30 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
 
         #[allow(clippy::all, clippy::pedantic)]
         impl #ident {
+            // Matches rather than searching `EnumType::items`, so no generic
+            // search is compiled per enum.
+            fn __gql_name(self) -> &'static ::std::primitive::str {
+                match self {
+                    #(#ident::#enum_items => #enum_names,)*
+                }
+            }
+
+            fn __parse_gql(value: #crate_name::Value) -> #crate_name::InputValueResult<Self> {
+                match #crate_name::resolver_utils::enum_name_of(&value) {
+                    #[allow(unreachable_patterns)]
+                    ::std::option::Option::Some(name) => match name {
+                        #(#enum_names => ::std::result::Result::Ok(#ident::#enum_items),)*
+                        _ => ::std::result::Result::Err(#crate_name::InputValueError::custom(::std::format_args!(
+                            r#"Enumeration type does not contain value "{}"."#,
+                            name,
+                        ))),
+                    },
+                    ::std::option::Option::None => {
+                        ::std::result::Result::Err(#crate_name::InputValueError::expected_type(value))
+                    }
+                }
+            }
+
             fn __type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
                 #gql_typename
             }
@@ -264,11 +288,11 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
             }
 
             fn parse(value: ::std::option::Option<#crate_name::Value>) -> #crate_name::InputValueResult<Self> {
-                #crate_name::resolver_utils::parse_enum(value.unwrap_or_default())
+                Self::__parse_gql(value.unwrap_or_default())
             }
 
             fn to_value(&self) -> #crate_name::Value {
-                #crate_name::resolver_utils::enum_value(*self)
+                #crate_name::resolver_utils::enum_name_value(self.__gql_name())
             }
 
             fn as_raw_value(&self) -> ::std::option::Option<&Self::RawValueType> {
@@ -287,17 +311,17 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
             }
 
             fn resolve_now(&self) -> ::std::option::Option<#crate_name::Value> {
-                ::std::option::Option::Some(#crate_name::resolver_utils::enum_value(*self))
+                ::std::option::Option::Some(#crate_name::resolver_utils::enum_name_value(self.__gql_name()))
             }
 
             async fn resolve(&self, _: &#crate_name::ContextSelectionSet<'_>, _field: &#crate_name::Positioned<#crate_name::parser::types::Field>) -> #crate_name::ServerResult<#crate_name::Value> {
-                ::std::result::Result::Ok(#crate_name::resolver_utils::enum_value(*self))
+                ::std::result::Result::Ok(#crate_name::resolver_utils::enum_name_value(self.__gql_name()))
             }
         }
 
         impl ::std::convert::From<#ident> for #crate_name::Value {
             fn from(value: #ident) -> #crate_name::Value {
-                #crate_name::resolver_utils::enum_value(value)
+                #crate_name::resolver_utils::enum_name_value(value.__gql_name())
             }
         }
 
