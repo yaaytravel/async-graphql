@@ -565,7 +565,7 @@ pub fn generate(
                     #(#get_params)*
                     #guard
                     let obj = #resolve_obj.map_err(|err| ctx.set_error_path(err))?;
-                    return #crate_name::resolver_utils::erase_field(#crate_name::resolver_utils::resolve_simple_field_value(ctx, &obj)).await;
+                    return #crate_name::resolver_utils::resolve_simple_field_value(ctx, &obj).await;
                 }
             };
 

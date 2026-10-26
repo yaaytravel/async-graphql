@@ -74,18 +74,3 @@ pub async fn resolve_simple_field_value<T: OutputType + ?Sized>(
     .map(Option::Some)
     .map_err(|err| ctx.set_error_path(err))
 }
-
-#[doc(hidden)]
-pub type BoxFieldResult<'a> =
-    std::pin::Pin<Box<dyn Future<Output = ServerResult<Option<Value>>> + Send + 'a>>;
-
-/// Erase a field resolver future so every arm of a generated `resolve_field`
-/// awaits the same small type instead of inlining each field's state machine.
-#[doc(hidden)]
-#[inline]
-pub fn erase_field<'a, F>(fut: F) -> BoxFieldResult<'a>
-where
-    F: Future<Output = ServerResult<Option<Value>>> + Send + 'a,
-{
-    Box::pin(fut)
-}

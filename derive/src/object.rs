@@ -692,11 +692,9 @@ pub fn generate(
 
                 let resolve_body = if is_async {
                     quote! {
-                        return #crate_name::resolver_utils::erase_field(
-                            #crate_name::resolver_utils::resolve_field_async(
-                                ctx,
-                                self.#field_ident(ctx, #(#use_params),*)
-                            )
+                        return #crate_name::resolver_utils::resolve_field_async(
+                            ctx,
+                            self.#field_ident(ctx, #(#use_params),*)
                         )
                         .await;
                     }
@@ -705,7 +703,7 @@ pub fn generate(
                         OutputType::Value(_) => {
                             quote! {
                                 let obj: #schema_ty = self.#field_ident(ctx, #(#use_params),*);
-                                return #crate_name::resolver_utils::erase_field(#crate_name::resolver_utils::resolve_simple_field_value(ctx, &obj)).await;
+                                return #crate_name::resolver_utils::resolve_simple_field_value(ctx, &obj).await;
                             }
                         }
                         OutputType::Result(_) => {
@@ -716,7 +714,7 @@ pub fn generate(
                                             .into_server_error(ctx.item.pos);
                                         ctx.set_error_path(err)
                                     })?;
-                                return #crate_name::resolver_utils::erase_field(#crate_name::resolver_utils::resolve_simple_field_value(ctx, &obj)).await;
+                                return #crate_name::resolver_utils::resolve_simple_field_value(ctx, &obj).await;
                             }
                         }
                     }
