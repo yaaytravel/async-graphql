@@ -691,17 +691,12 @@ pub fn generate(
                 };
 
                 let resolve_body = if is_async {
-                    let resolve_value = gen_resolve_field_value(&crate_name, quote!(&obj), false);
                     quote! {
-                        let obj = self.#field_ident(ctx, #(#use_params),*)
-                            .await
-                            .map_err(|err| {
-                                ctx.set_error_path(
-                                    ::std::convert::Into::<#crate_name::Error>::into(err)
-                                        .into_server_error(ctx.item.pos),
-                                )
-                            })?;
-                        return #resolve_value;
+                        return #crate_name::resolver_utils::resolve_field_async(
+                            ctx,
+                            self.#field_ident(ctx, #(#use_params),*)
+                        )
+                        .await;
                     }
                 } else {
                     let resolve_value = gen_resolve_field_value(&crate_name, quote!(&obj), true);

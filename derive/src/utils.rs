@@ -398,16 +398,9 @@ pub fn gen_resolve_field_value(
     value: TokenStream,
     set_error_path: bool,
 ) -> TokenStream {
-    let map_err = set_error_path.then(|| quote!(.map_err(|err| ctx.set_error_path(err))));
+    let _ = set_error_path;
     quote! {
-        #crate_name::OutputType::resolve(
-            #value,
-            &ctx.with_selection_set(&ctx.item.node.selection_set),
-            ctx.item,
-        )
-        .await
-        .map(::std::option::Option::Some)
-        #map_err
+        #crate_name::resolver_utils::resolve_simple_field_value(ctx, #value).await
     }
 }
 
