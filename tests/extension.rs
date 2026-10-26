@@ -533,3 +533,97 @@ pub async fn subscription_execute_with_data() {
         );
     }
 }
+
+#[tokio::test]
+pub async fn test_resolve_hook_runs_behind_pass_through_extensions() {
+    // An extension that keeps the default `resolve`, which only calls the next one.
+    struct PassThrough;
+
+    impl ExtensionFactory for PassThrough {
+        fn create(&self) -> Arc<dyn Extension> {
+            Arc::new(PassThrough)
+        }
+    }
+
+    impl Extension for PassThrough {}
+
+    // An extension that counts every field and list item it resolves.
+    struct Counter(Arc<AtomicI32>);
+
+    impl ExtensionFactory for Counter {
+        fn create(&self) -> Arc<dyn Extension> {
+            Arc::new(Counter(self.0.clone()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Extension for Counter {
+        async fn resolve(
+            &self,
+            ctx: &ExtensionContext<'_>,
+            info: ResolveInfo<'_>,
+            next: NextResolve<'_>,
+        ) -> ServerResult<Option<ConstValue>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            next.run(ctx, info).await
+        }
+    }
+
+    #[derive(SimpleObject)]
+    struct Item {
+        a: i32,
+        b: String,
+    }
+
+    struct Query;
+
+    #[Object]
+    impl Query {
+        async fn items(&self) -> Vec<Item> {
+            (0..3)
+                .map(|a| Item {
+                    a,
+                    b: a.to_string(),
+                })
+                .collect()
+        }
+
+        async fn numbers(&self) -> Vec<i32> {
+            vec![1, 2, 3]
+        }
+    }
+
+    let query = "{ items { a b } numbers }";
+    let expected = value!({
+        "items": [{"a": 0, "b": "0"}, {"a": 1, "b": "1"}, {"a": 2, "b": "2"}],
+        "numbers": [1, 2, 3],
+    });
+
+    // Only pass-through extensions: the hooks are skipped once that is known,
+    // and the response is unchanged.
+    let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
+        .extension(PassThrough)
+        .extension(PassThrough)
+        .finish();
+    for _ in 0..2 {
+        assert_eq!(
+            schema.execute(query).await.into_result().unwrap().data,
+            expected
+        );
+    }
+
+    // A counting extension behind a pass-through one still sees every field
+    // (2 + 3 items x 2 fields) and every list item (3 + 3), on every request.
+    let count = Arc::new(AtomicI32::new(0));
+    let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
+        .extension(PassThrough)
+        .extension(Counter(count.clone()))
+        .finish();
+    for request in 1..=2 {
+        assert_eq!(
+            schema.execute(query).await.into_result().unwrap().data,
+            expected
+        );
+        assert_eq!(count.load(Ordering::SeqCst), request * 14);
+    }
+}

@@ -475,8 +475,8 @@ impl<'a> Fields<'a> {
                         continue;
                     }
 
-                    let hooks =
-                        !ctx.query_env.extensions.is_empty() || !field.node.directives.is_empty();
+                    let hooks = ctx.query_env.extensions.has_resolve_hooks()
+                        || !field.node.directives.is_empty();
                     self.push(field_name, root.erased_resolve_field(ctx_field, hooks));
                 }
                 selection => {

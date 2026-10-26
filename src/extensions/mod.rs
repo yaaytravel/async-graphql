@@ -14,7 +14,10 @@ mod tracing;
 use std::{
     any::{Any, TypeId},
     future::Future,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use futures_util::{FutureExt, future::BoxFuture, stream::BoxStream};
@@ -349,9 +352,21 @@ impl NextExecute<'_> {
 pub struct NextResolve<'a> {
     chain: &'a [Arc<dyn Extension>],
     resolve_fut: ResolveFut<'a>,
+    /// Index of the first extension in `chain` among all of the request's
+    /// extensions.
+    index: usize,
+    pass_through: &'a AtomicU64,
 }
 
 impl NextResolve<'_> {
+    /// Records that the extension calling this, the one before `chain`, uses
+    /// the default [`Extension::resolve`], which only calls the next one.
+    fn mark_pass_through(&self) {
+        if let Some(bit) = self.index.checked_sub(1).filter(|bit| *bit < 64) {
+            self.pass_through.fetch_or(1 << bit, Ordering::Relaxed);
+        }
+    }
+
     /// Call the [Extension::resolve] function of next extension.
     pub async fn run(
         self,
@@ -366,6 +381,8 @@ impl NextResolve<'_> {
                     NextResolve {
                         chain: next,
                         resolve_fut: self.resolve_fut,
+                        index: self.index + 1,
+                        pass_through: self.pass_through,
                     },
                 )
                 .await
@@ -440,6 +457,7 @@ pub trait Extension: Sync + Send + 'static {
         info: ResolveInfo<'_>,
         next: NextResolve<'_>,
     ) -> ServerResult<Option<Value>> {
+        next.mark_pass_through();
         next.run(ctx, info).await
     }
 }
@@ -452,13 +470,29 @@ pub trait ExtensionFactory: Send + Sync + 'static {
     fn create(&self) -> Arc<dyn Extension>;
 }
 
-#[derive(Clone)]
 #[doc(hidden)]
 pub struct Extensions {
     extensions: Vec<Arc<dyn Extension>>,
+    /// Bit `i` is set once extension `i` is seen to use the default
+    /// [`Extension::resolve`]. When every extension does, fields and list items
+    /// skip the per-field hooks, which would only pass each one straight through.
+    pass_through_resolve: AtomicU64,
     schema_env: SchemaEnv,
     session_data: Arc<Data>,
     query_data: Option<Arc<Data>>,
+}
+
+impl Clone for Extensions {
+    fn clone(&self) -> Self {
+        Extensions {
+            extensions: self.extensions.clone(),
+            // The clone holds the same extension instances.
+            pass_through_resolve: AtomicU64::new(self.pass_through_resolve.load(Ordering::Relaxed)),
+            schema_env: self.schema_env.clone(),
+            session_data: self.session_data.clone(),
+            query_data: self.query_data.clone(),
+        }
+    }
 }
 
 #[doc(hidden)]
@@ -470,6 +504,7 @@ impl Extensions {
     ) -> Self {
         Extensions {
             extensions: extensions.into_iter().collect(),
+            pass_through_resolve: AtomicU64::new(0),
             schema_env,
             session_data,
             query_data: None,
@@ -482,8 +517,16 @@ impl Extensions {
     }
 
     #[inline]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.extensions.is_empty()
+    /// Whether resolving a field needs to go through [`Extensions::resolve`]:
+    /// some extension overrides [`Extension::resolve`], or has not resolved a
+    /// field yet in this request, so it is not yet known whether it does.
+    pub(crate) fn has_resolve_hooks(&self) -> bool {
+        match self.extensions.len() {
+            0 => false,
+            len @ 1..=63 => self.pass_through_resolve.load(Ordering::Relaxed) != (1 << len) - 1,
+            64 => self.pass_through_resolve.load(Ordering::Relaxed) != u64::MAX,
+            _ => true,
+        }
     }
 
     #[inline]
@@ -566,6 +609,8 @@ impl Extensions {
         let next = NextResolve {
             chain: &self.extensions,
             resolve_fut,
+            index: 0,
+            pass_through: &self.pass_through_resolve,
         };
         next.run(&self.create_context(), info).await
     }

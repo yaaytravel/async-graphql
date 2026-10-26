@@ -44,7 +44,7 @@ pub fn resolve_list<'b, T: OutputType + 'b>(
     iter: impl IntoIterator<Item = T>,
     len: Option<usize>,
 ) -> impl Future<Output = ServerResult<Value>> + Send + 'b {
-    let hooks = !ctx.query_env.extensions.is_empty();
+    let hooks = ctx.query_env.extensions.has_resolve_hooks();
     let mut values: Vec<Value> = len.map(Vec::with_capacity).unwrap_or_default();
     let mut pending: Vec<(usize, BoxValueFuture<'_>)> = Vec::new();
     for (idx, item) in iter.into_iter().enumerate() {
