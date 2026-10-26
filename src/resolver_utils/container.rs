@@ -1,10 +1,4 @@
-use std::{
-    borrow::Cow,
-    future::Future,
-    pin::Pin,
-    sync::Arc,
-    task::{Poll, ready},
-};
+use std::{borrow::Cow, future::Future, pin::Pin, sync::Arc, task::Poll};
 
 use indexmap::IndexMap;
 
@@ -259,19 +253,64 @@ fn insert_value(target: &mut IndexMap<Name, Value>, name: Name, value: Value) {
     }
 }
 
+/// Above this many fields, `try_join_all` (which only polls the fields that
+/// were woken) is used instead of polling every pending field on each wake.
+const JOIN_IN_PLACE_MAX: usize = 32;
+
 async fn join_fields(fields: ServerResult<Fields<'_>>, parallel: bool) -> ServerResult<Value> {
     let fields = fields?.futures;
-    let res = if parallel {
-        futures_util::future::try_join_all(fields).await?
-    } else {
-        let mut results = Vec::with_capacity(fields.len());
-        for field in fields {
-            results.push(field.await?);
-        }
-        results
-    };
+    if parallel && fields.len() > JOIN_IN_PLACE_MAX {
+        let res = futures_util::future::try_join_all(fields.into_iter().map(|field| async move {
+            let value = match field.state {
+                FieldState::Pending(fut) => fut.await?.unwrap_or_default(),
+                FieldState::Done(value) => value,
+            };
+            Ok::<_, ServerError>((field.name, value))
+        }))
+        .await?;
+        return Ok(create_value_object(res));
+    }
+    JoinFields { fields, parallel }.await
+}
 
-    Ok(create_value_object(res))
+/// Waits for every field of a container in place: each slot's future is
+/// replaced by its value, and the values are moved into the result object, so
+/// no other list is allocated. Serially, a field is only polled once every
+/// field before it has its value.
+struct JoinFields<'a> {
+    fields: Vec<FieldFuture<'a>>,
+    parallel: bool,
+}
+
+impl Future for JoinFields<'_> {
+    type Output = ServerResult<Value>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let mut done = true;
+        for field in &mut this.fields {
+            if let FieldState::Pending(fut) = &mut field.state {
+                match fut.as_mut().poll(cx) {
+                    Poll::Ready(Ok(value)) => {
+                        field.state = FieldState::Done(value.unwrap_or_default())
+                    }
+                    Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                    Poll::Pending if this.parallel => done = false,
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+        }
+        if !done {
+            return Poll::Pending;
+        }
+        let mut map = IndexMap::with_capacity(this.fields.len());
+        for field in this.fields.drain(..) {
+            if let FieldState::Done(value) = field.state {
+                insert_value(&mut map, field.name, value);
+            }
+        }
+        Poll::Ready(Ok(Value::Object(map)))
+    }
 }
 
 /// Runs a field's resolver through the request's extensions and the field's
@@ -347,23 +386,16 @@ pub async fn resolve_field_with_hooks(
     extensions.resolve(resolve_info, &mut resolve_fut).await
 }
 
-/// A selected field: its response key and the future that resolves its value.
+/// A selected field: its response key, and the future that resolves its value
+/// until the value is there.
 struct FieldFuture<'a> {
-    name: Option<Name>,
-    value: BoxFieldResult<'a>,
+    name: Name,
+    state: FieldState<'a>,
 }
 
-impl Future for FieldFuture<'_> {
-    type Output = ServerResult<(Name, Value)>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-        let value = ready!(self.value.as_mut().poll(cx))?;
-        let name = self
-            .name
-            .take()
-            .expect("field future polled after completion");
-        Poll::Ready(Ok((name, value.unwrap_or_default())))
-    }
+enum FieldState<'a> {
+    Pending(BoxFieldResult<'a>),
+    Done(Value),
 }
 
 /// A set of fields on an container that are being selected.
@@ -395,8 +427,8 @@ impl<'a> Fields<'a> {
 
     fn push(&mut self, name: Name, value: BoxFieldResult<'a>) {
         self.futures.push(FieldFuture {
-            name: Some(name),
-            value,
+            name,
+            state: FieldState::Pending(value),
         });
     }
 
@@ -436,10 +468,10 @@ impl<'a> Fields<'a> {
 
                     if field.node.name.node == "__typename" {
                         let typename = root.erased_introspection_type_name().into_owned();
-                        self.push(
-                            field_name,
-                            Box::pin(std::future::ready(Ok(Some(Value::String(typename))))),
-                        );
+                        self.futures.push(FieldFuture {
+                            name: field_name,
+                            state: FieldState::Done(Value::String(typename)),
+                        });
                         continue;
                     }
 
