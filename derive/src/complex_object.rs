@@ -88,14 +88,18 @@ pub fn generate(
                             .into_iter(),
                     );
 
+                    // The base method returns a plain value or a `Result`, as written.
+                    let base_value = quote! {{
+                        use #crate_name::resolver_utils::{FieldReturnResult as _, FieldReturnValue as _};
+                        let value = #self_ty::#base_function_name(&self, #other_atts).await;
+                        (&value).field_return_kind().convert(value)?
+                    }};
                     let new_block = match with {
                         Some(with) => quote!({
-                            ::std::result::Result::Ok(#with(#self_ty::#base_function_name(&self, #other_atts).await?))
+                            ::std::result::Result::Ok(#with(#base_value))
                         }),
                         None => quote!({
-                            {
-                                ::std::result::Result::Ok(#self_ty::#base_function_name(&self, #other_atts).await?.into())
-                            }
+                            ::std::result::Result::Ok(#base_value.into())
                         }),
                     };
 
@@ -497,28 +501,21 @@ pub fn generate(
             });
 
             let field_ident = &method.sig.ident;
-            if is_async && let OutputType::Value(inner_ty) = &ty {
-                let block = &method.block;
-                let new_block = quote!({
-                    {
-                        ::std::result::Result::Ok(async move {
-                            let value:#inner_ty = #block;
-                            value
-                        }.await)
-                    }
-                });
-                method.block = syn::parse2::<Block>(new_block).expect("invalid block");
-                method.sig.output =
-                    syn::parse2::<ReturnType>(quote! { -> #crate_name::Result<#inner_ty> })
-                        .expect("invalid result type");
-            }
-
+            // A method returning a plain value is called as written and its value wrapped
+            // here, rather than rewriting its body into a nested async block.
             let resolve_obj = if is_async {
-                quote! {
-                    {
-                        let res = self.#field_ident(ctx, #(#use_params),*).await;
-                        res.map_err(|err| ::std::convert::Into::<#crate_name::Error>::into(err).into_server_error(ctx.item.pos))
-                    }
+                match &ty {
+                    OutputType::Value(_) => quote! {
+                        ::std::result::Result::Ok::<_, #crate_name::ServerError>(
+                            self.#field_ident(ctx, #(#use_params),*).await
+                        )
+                    },
+                    OutputType::Result(_) => quote! {
+                        {
+                            let res = self.#field_ident(ctx, #(#use_params),*).await;
+                            res.map_err(|err| ::std::convert::Into::<#crate_name::Error>::into(err).into_server_error(ctx.item.pos))
+                        }
+                    },
                 }
             } else {
                 match &ty {

@@ -355,9 +355,11 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
 
         for enum_name in &enum_names {
             calls.push(quote! {
-                #ident::#enum_name(obj) => obj.#method_name(#(#use_params),*)
-                    .await.map_err(|err| ::std::convert::Into::<#crate_name::Error>::into(err))
-                    .map(::std::convert::Into::into)
+                #ident::#enum_name(obj) => {
+                    use #crate_name::resolver_utils::{FieldReturnResult as _, FieldReturnValue as _};
+                    let value = obj.#method_name(#(#use_params),*).await;
+                    (&value).field_return_kind().convert(value).map(::std::convert::Into::into)
+                }
             });
         }
 
