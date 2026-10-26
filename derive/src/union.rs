@@ -206,7 +206,7 @@ pub fn generate(union_args: &args::Union) -> GeneratorResult<TokenStream> {
     };
 
     let expanded = if union_args.concretes.is_empty() {
-        let (erased_impl, resolve_erased) = gen_erased_container(
+        let (erased_impl, resolve_erased, _) = gen_erased_container(
             &crate_name,
             &quote!(#ident #ty_generics),
             &union_args.generics,

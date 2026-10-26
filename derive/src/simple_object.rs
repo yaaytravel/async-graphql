@@ -528,7 +528,7 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
         quote! { #crate_name::resolver_utils::resolve_container(ctx, self).await }
     };
 
-    let (erased_impl, resolve_erased) = gen_erased_container(
+    let (erased_impl, resolve_erased, collect_erased) = gen_erased_container(
         &crate_name,
         &quote!(#ident #ty_generics),
         &object_args.generics,
@@ -545,6 +545,8 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
             #[allow(clippy::all, clippy::pedantic)]
             #boxed_trait
             impl #impl_generics #crate_name::resolver_utils::ContainerType for #ident #ty_generics #where_clause {
+                #collect_erased
+
                 async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
                     #field_match
                     #(#flattened_resolvers)*

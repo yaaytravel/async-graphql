@@ -843,8 +843,8 @@ pub fn generate(
 
     // A trait object's lifetime defaults differ between `impl dyn Trait` and
     // `&'a dyn Trait`, so those keep the generic resolution path.
-    let (erased_impl, resolve_erased) = if is_trait_object(&item_impl.self_ty) {
-        (quote!(), resolve_container.clone())
+    let (erased_impl, resolve_erased, collect_erased) = if is_trait_object(&item_impl.self_ty) {
+        (quote!(), resolve_container.clone(), quote!())
     } else {
         gen_erased_container(
             &crate_name,
@@ -865,6 +865,8 @@ pub fn generate(
                 #[allow(unused_braces, unused_variables, unused_parens, unused_mut)]
                 #boxed_trait
                 impl #impl_generics #crate_name::resolver_utils::ContainerType for #self_ty #where_clause {
+                    #collect_erased
+
                     async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
                         #resolve_field_resolver_match
                         #(#flattened_resolvers)*

@@ -489,7 +489,7 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
 
     let visible = visible_fn(&interface_args.visible);
     let field_count = schema_fields.len();
-    let (erased_impl, resolve_erased) = gen_erased_container(
+    let (erased_impl, resolve_erased, _) = gen_erased_container(
         &crate_name,
         &quote!(#ident #ty_generics),
         &interface_args.generics,

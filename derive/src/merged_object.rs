@@ -135,7 +135,7 @@ pub fn generate(object_args: &args::MergedObject) -> GeneratorResult<TokenStream
     };
 
     let visible = visible_fn(&object_args.visible);
-    let (erased_impl, resolve_container) = gen_erased_container(
+    let (erased_impl, resolve_container, collect_erased) = gen_erased_container(
         &crate_name,
         &quote!(#ident #ty_generics),
         &object_args.generics,
@@ -146,6 +146,8 @@ pub fn generate(object_args: &args::MergedObject) -> GeneratorResult<TokenStream
         #[allow(clippy::all, clippy::pedantic)]
         #boxed_trait
         impl #impl_generics #crate_name::resolver_utils::ContainerType for #ident #ty_generics #where_clause {
+            #collect_erased
+
             async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
                 #flat_resolve_field
                 ::std::result::Result::Ok(::std::option::Option::None)

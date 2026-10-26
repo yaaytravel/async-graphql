@@ -410,7 +410,10 @@ impl<'a> Fields<'a> {
         self.add_set_erased(ctx, &GenericContainer(root))
     }
 
-    fn add_set_erased(
+    /// Add another set of fields using an erased container. The derive macros
+    /// call this from their generated `collect_all_fields`.
+    #[doc(hidden)]
+    pub fn add_set_erased(
         &mut self,
         ctx: &ContextSelectionSet<'a>,
         root: &dyn ErasedContainer<'a>,

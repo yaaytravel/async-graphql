@@ -411,8 +411,12 @@ pub fn gen_resolve_field_value(
     }
 }
 
-/// Generates an `ErasedContainer` impl for `&Self` and the `OutputType::resolve`
-/// body that resolves through it.
+/// Generates an `ErasedContainer` impl for `&Self`, the `OutputType::resolve`
+/// body that resolves through it, and a `ContainerType::collect_all_fields`
+/// that collects through it rather than through the generic default.
+///
+/// Interfaces and unions forward `collect_all_fields` to their variants, so
+/// they do not use the third part.
 ///
 /// Because the impl is generated per type, resolving one object type and then
 /// the next one goes through no generic library code. rustc counts the
@@ -424,7 +428,7 @@ pub fn gen_erased_container(
     self_ty: &TokenStream,
     generics: &syn::Generics,
     serial: bool,
-) -> (TokenStream, TokenStream) {
+) -> (TokenStream, TokenStream, TokenStream) {
     let mut generics = generics.clone();
     generics.params.insert(0, parse_quote!('__erased));
     let (impl_generics, _, where_clause) = generics.split_for_impl();
@@ -509,7 +513,16 @@ pub fn gen_erased_container(
     let resolve = quote! {
         #crate_name::resolver_utils::resolve_container_dyn(ctx, &self, #parallel).await
     };
-    (erased_impl, resolve)
+    let collect_all_fields = quote! {
+        fn collect_all_fields<'__erased>(
+            &'__erased self,
+            ctx: &#crate_name::ContextSelectionSet<'__erased>,
+            fields: &mut #crate_name::resolver_utils::Fields<'__erased>,
+        ) -> #crate_name::ServerResult<()> {
+            fields.add_set_erased(ctx, &self)
+        }
+    };
+    (erased_impl, resolve, collect_all_fields)
 }
 
 /// Whether `ty` is a trait object such as `dyn Trait`, looking through
