@@ -226,7 +226,7 @@ pub fn resolve_container_dyn<'a>(
 }
 
 pub(crate) fn create_value_object(values: Vec<(Name, Value)>) -> Value {
-    let mut map = IndexMap::new();
+    let mut map = IndexMap::with_capacity(values.len());
     for (name, value) in values {
         insert_value(&mut map, name, value);
     }
@@ -379,7 +379,7 @@ pub struct Fields<'a> {
 impl<'a> Fields<'a> {
     fn new(ctx: &'a ContextSelectionSet<'a>) -> Self {
         Fields {
-            futures: Vec::new(),
+            futures: Vec::with_capacity(ctx.item.node.items.len()),
             parent_path: ctx.path_node.as_ref(),
         }
     }
