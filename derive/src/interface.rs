@@ -343,12 +343,12 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
 
             schema_args.push(quote! {
                 {
-                    let arg = #crate_name::registry::add_input_value(
-                        &mut field.args,
-                        #name,
+                    let mut arg = #crate_name::registry::MetaInputValue::new(
+                        ::std::string::ToString::to_string(#name),
                         <#ty as #crate_name::InputType>::create_type_info(registry),
                     );
                     #(#arg_sets)*
+                    field.args.insert(::std::string::ToString::to_string(#name), arg);
                 }
             });
         }
@@ -451,15 +451,13 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
         }
 
         schema_fields.push(quote! {
-            {
-                let field = #crate_name::registry::add_field(
-                    &mut fields,
-                    #name,
-                    <#schema_ty as #crate_name::OutputType>::create_type_info(registry),
-                );
-                #(#schema_args)*
-                #(#field_sets)*
-            }
+            let mut field = #crate_name::registry::MetaField::new(
+                ::std::string::ToString::to_string(#name),
+                <#schema_ty as #crate_name::OutputType>::create_type_info(registry),
+            );
+            #(#schema_args)*
+            #(#field_sets)*
+            fields.insert(::std::string::ToString::to_string(#name), field);
         });
 
         let resolve_obj = quote! {

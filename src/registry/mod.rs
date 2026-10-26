@@ -261,32 +261,6 @@ pub struct MetaField {
     pub requires_scopes: Vec<String>,
 }
 
-/// Inserts a field into a type's field map and returns it for further setup.
-///
-/// The derive macros call this instead of building and moving a `MetaField`
-/// in generated code, which keeps the code generated per field small.
-#[doc(hidden)]
-pub fn add_field<'a>(
-    fields: &'a mut IndexMap<String, MetaField>,
-    name: &str,
-    ty: String,
-) -> &'a mut MetaField {
-    let (index, _) = fields.insert_full(name.to_string(), MetaField::new(name, ty));
-    &mut fields[index]
-}
-
-/// Inserts an argument or input field into its map and returns it for further
-/// setup. See [`add_field`].
-#[doc(hidden)]
-pub fn add_input_value<'a>(
-    values: &'a mut IndexMap<String, MetaInputValue>,
-    name: &str,
-    ty: String,
-) -> &'a mut MetaInputValue {
-    let (index, _) = values.insert_full(name.to_string(), MetaInputValue::new(name, ty));
-    &mut values[index]
-}
-
 impl MetaField {
     pub fn new(name: impl Into<String>, ty: impl Into<String>) -> Self {
         Self {

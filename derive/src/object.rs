@@ -517,12 +517,12 @@ pub fn generate(
 
                     schema_args.push(quote! {
                         {
-                            let arg = #crate_name::registry::add_input_value(
-                                &mut field.args,
-                                #name,
+                            let mut arg = #crate_name::registry::MetaInputValue::new(
+                                ::std::string::ToString::to_string(#name),
                                 <#ty as #crate_name::InputType>::create_type_info(registry),
                             );
                             #(#arg_sets)*
+                            field.args.insert(::std::string::ToString::to_string(#name), arg);
                         }
                     });
 
@@ -644,13 +644,13 @@ pub fn generate(
                 schema_fields.push(quote! {
                     #(#cfg_attrs)*
                     {
-                        let field = #crate_name::registry::add_field(
-                            &mut fields,
-                            #field_name,
+                        let mut field = #crate_name::registry::MetaField::new(
+                            ::std::string::ToString::to_string(#field_name),
                             <#schema_ty as #crate_name::OutputType>::create_type_info(registry),
                         );
                         #(#schema_args)*
                         #(#field_sets)*
+                        fields.insert(::std::string::ToString::to_string(#field_name), field);
                     }
                 });
 
