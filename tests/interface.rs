@@ -3,6 +3,7 @@ use async_graphql::*;
 #[tokio::test]
 pub async fn test_interface_simple_object() {
     #[derive(SimpleObject)]
+    #[graphql(getters)]
     struct MyObj {
         id: i32,
         title: String,
@@ -48,6 +49,7 @@ pub async fn test_interface_simple_object() {
 #[tokio::test]
 pub async fn test_interface_simple_object2() {
     #[derive(SimpleObject)]
+    #[graphql(getters)]
     struct MyObj {
         id: i32,
         title: String,
@@ -477,6 +479,7 @@ pub async fn test_issue_330() {
 #[tokio::test]
 pub async fn test_interface_with_oneof_object() {
     #[derive(SimpleObject, InputObject)]
+    #[graphql(getters)]
     #[graphql(input_name = "MyObjAInput")]
     struct MyObjA {
         id: i32,
@@ -484,6 +487,7 @@ pub async fn test_interface_with_oneof_object() {
     }
 
     #[derive(SimpleObject, InputObject)]
+    #[graphql(getters)]
     #[graphql(input_name = "MyObjBInput")]
     struct MyObjB {
         id: i32,
@@ -615,6 +619,7 @@ pub mod test_interface_docs {
 
     /// Some object
     #[derive(SimpleObject)]
+    #[graphql(getters)]
     pub struct MyObj {
         id: i32,
         title: String,

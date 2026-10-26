@@ -7,6 +7,8 @@ Therefore, the `Object`'s fields' type and arguments must match with the `Interf
 
 `Async-graphql` implements auto conversion from `Object` to `Interface`, you only need to call `Into::into`.
 
+A `SimpleObject` that implements an interface needs `#[graphql(getters)]`, which generates the method per field that the interface calls.
+
 Interface field names are transformed to camelCase for the schema definition.
 If you need e.g. a snake_cased GraphQL field name, you can use both the `name` and `method` attributes.
 
@@ -87,6 +89,7 @@ enum MyInterface {
 }
 
 #[derive(SimpleObject)]
+#[graphql(getters)]
 struct MyObject {
     name: String,
 }
@@ -112,6 +115,7 @@ You need to manually register the `MyInterface` type when constructing the `Sche
 # #[graphql(field(name = "name", ty = "String"))]
 # enum MyInterface { MyObject(MyObject) }
 # #[derive(SimpleObject)]
+# #[graphql(getters)]
 # struct MyObject { name: String, }
 # struct Query;
 # #[Object]

@@ -249,6 +249,10 @@ pub struct SimpleObject {
 
     #[darling(default)]
     pub internal: bool,
+    /// Generates a getter per field, `fn field(&self, ctx) -> impl Future`,
+    /// as an interface needs on the types implementing it.
+    #[darling(default)]
+    pub getters: bool,
     #[darling(default)]
     pub fake: bool,
     #[darling(default)]
@@ -536,6 +540,10 @@ pub struct InputObject {
 
     #[darling(default)]
     pub internal: bool,
+    /// Belongs to `SimpleObject`, accepted here so a type can derive both.
+    #[darling(default)]
+    #[allow(dead_code)]
+    pub getters: bool,
     #[darling(default)]
     pub name: Option<String>,
     #[darling(default)]

@@ -2,7 +2,7 @@ Define a GraphQL object with fields
 
 *[See also the Book](https://async-graphql.github.io/async-graphql/en/define_simple_object.html).*
 
-Similar to `Object`, but defined on a structure that automatically generates getters for all fields. For a list of valid field types, see [`Object`](attr.Object.html). All fields are converted to camelCase.
+Similar to `Object`, but defined on a structure whose fields are the object's fields. For a list of valid field types, see [`Object`](attr.Object.html). All fields are converted to camelCase.
 
 # Macro attributes
 
@@ -22,6 +22,7 @@ Similar to `Object`, but defined on a structure that automatically generates get
 | serial        | Resolve each field sequentially.                                                                                                                                                                        | bool                                       | Y        |
 | guard         | Field of guard *[See also the Book](https://async-graphql.github.io/async-graphql/en/field_guard.html)*                                                                                                 | string                                     | Y        |
 | directives    | Directives                                                                                                                                                                                              | expr                                       | Y        |
+| getters       | Generate a getter per field, `fn field(&self, ctx: &Context<'_>) -> impl Future<Output = Result<&T>>`. Needed when the object implements an [`Interface`](derive.Interface.html), whose fields call them. | bool                                       | Y        |
 
 # Field attributes
 

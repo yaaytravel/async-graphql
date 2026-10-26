@@ -411,11 +411,13 @@ pub async fn test_entity_inaccessible() {
     }
 
     #[derive(SimpleObject)]
+    #[graphql(getters)]
     struct MyInterfaceObjA {
         inaccessible_interface_value: String,
     }
 
     #[derive(SimpleObject)]
+    #[graphql(getters)]
     #[graphql(inaccessible)]
     struct MyInterfaceObjB {
         inaccessible_interface_value: String,
@@ -691,11 +693,13 @@ pub async fn test_entity_tag() {
     }
 
     #[derive(SimpleObject)]
+    #[graphql(getters)]
     struct MyInterfaceObjA {
         tagged_interface_value: String,
     }
 
     #[derive(SimpleObject)]
+    #[graphql(getters)]
     #[graphql(tag = "interface_object")]
     struct MyInterfaceObjB {
         tagged_interface_value: String,
@@ -886,11 +890,13 @@ pub async fn test_entity_requires_scopes() {
     }
 
     #[derive(SimpleObject)]
+    #[graphql(getters)]
     struct MyInterfaceObjA {
         requires_scoped_interface_value: String,
     }
 
     #[derive(SimpleObject)]
+    #[graphql(getters)]
     #[graphql(requires_scopes = "objB:read")]
     struct MyInterfaceObjB {
         requires_scoped_interface_value: String,
@@ -1023,6 +1029,7 @@ pub async fn test_entity_requires_scopes() {
 #[tokio::test]
 pub async fn test_interface_object() {
     #[derive(SimpleObject)]
+    #[graphql(getters)]
     struct VariantA {
         pub id: u64,
     }

@@ -218,16 +218,19 @@ fn interface() {
         use async_graphql::*;
 
         #[derive(SimpleObject, Default)]
+        #[graphql(getters)]
         pub struct ObjA {
             pub a: i32,
         }
 
         #[derive(SimpleObject, Default)]
+        #[graphql(getters)]
         pub struct ObjB {
             pub a: i32,
         }
 
         #[derive(SimpleObject, Default)]
+        #[graphql(getters)]
         pub struct ObjC {
             pub a: i32,
         }

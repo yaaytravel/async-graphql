@@ -361,15 +361,19 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
         };
 
         if !field.flatten {
-            // A plain function returning a ready future: called the same way as
-            // an `async fn`, without a state machine for the compiler to check.
-            getters.push(quote! {
+            // Only on request: the executor never calls getters, and each is a
+            // function for the compiler to check. Interfaces call them on the
+            // types implementing them. A plain function returning a ready
+            // future, called the same way as an `async fn`.
+            if object_args.getters {
+                getters.push(quote! {
                  #[inline]
                  #[allow(missing_docs)]
                  #vis fn #ident(&self, ctx: &#crate_name::Context<'_>) -> ::std::future::Ready<#crate_name::Result<#ty>> {
                      ::std::future::ready(::std::result::Result::Ok(#block))
                  }
-            });
+                });
+            }
 
             // A borrowed field is passed as is, so `&T` is resolved as `T`
             // rather than through the blanket `OutputType for &T`.

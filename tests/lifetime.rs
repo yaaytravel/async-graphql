@@ -5,6 +5,7 @@ use async_graphql::*;
 use static_assertions_next::_core::marker::PhantomData;
 
 #[derive(SimpleObject)]
+#[graphql(getters)]
 struct ObjA<'a> {
     value: &'a i32,
 }

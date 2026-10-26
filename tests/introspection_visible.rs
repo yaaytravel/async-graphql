@@ -300,6 +300,7 @@ pub async fn test_indirect_hiding_type() {
     }
 
     #[derive(SimpleObject)]
+    #[graphql(getters)]
     struct MyObj3 {
         a: i32,
         #[graphql(visible = false)]
@@ -307,6 +308,7 @@ pub async fn test_indirect_hiding_type() {
     }
 
     #[derive(SimpleObject)]
+    #[graphql(getters)]
     #[graphql(visible = false)]
     struct MyObj4 {
         a: i32,
