@@ -361,11 +361,13 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
         };
 
         if !field.flatten {
+            // A plain function returning a ready future: called the same way as
+            // an `async fn`, without a state machine for the compiler to check.
             getters.push(quote! {
                  #[inline]
                  #[allow(missing_docs)]
-                 #vis async fn #ident(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::Result<#ty> {
-                     ::std::result::Result::Ok(#block)
+                 #vis fn #ident(&self, ctx: &#crate_name::Context<'_>) -> ::std::future::Ready<#crate_name::Result<#ty>> {
+                     ::std::future::ready(::std::result::Result::Ok(#block))
                  }
             });
 
