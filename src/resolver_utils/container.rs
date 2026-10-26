@@ -24,10 +24,14 @@ pub trait ContainerType: OutputType {
     /// `async_graphql::Value`.
     ///
     /// If the field was not found returns None.
-    fn resolve_field(
-        &self,
-        ctx: &Context<'_>,
-    ) -> impl Future<Output = ServerResult<Option<Value>>> + Send;
+    ///
+    /// The container and the context share one lifetime, so an implementation
+    /// can return a field's future directly. An `async fn` with separate
+    /// lifetimes still implements it.
+    fn resolve_field<'a>(
+        &'a self,
+        ctx: &'a Context<'a>,
+    ) -> impl Future<Output = ServerResult<Option<Value>>> + Send + 'a;
 
     /// Resolves a field into a boxed future that owns its context. The erased
     /// containers the derives generate resolve fields through this, so a
@@ -74,8 +78,11 @@ pub trait ContainerType: OutputType {
 }
 
 impl<T: ContainerType + ?Sized> ContainerType for &T {
-    async fn resolve_field(&self, ctx: &Context<'_>) -> ServerResult<Option<Value>> {
-        T::resolve_field(*self, ctx).await
+    fn resolve_field<'a>(
+        &'a self,
+        ctx: &'a Context<'a>,
+    ) -> impl Future<Output = ServerResult<Option<Value>>> + Send + 'a {
+        T::resolve_field(*self, ctx)
     }
 
     async fn find_entity(&self, ctx: &Context<'_>, params: &Value) -> ServerResult<Option<Value>> {
@@ -84,8 +91,11 @@ impl<T: ContainerType + ?Sized> ContainerType for &T {
 }
 
 impl<T: ContainerType + ?Sized> ContainerType for Arc<T> {
-    async fn resolve_field(&self, ctx: &Context<'_>) -> ServerResult<Option<Value>> {
-        T::resolve_field(self, ctx).await
+    fn resolve_field<'a>(
+        &'a self,
+        ctx: &'a Context<'a>,
+    ) -> impl Future<Output = ServerResult<Option<Value>>> + Send + 'a {
+        T::resolve_field(self, ctx)
     }
 
     async fn find_entity(&self, ctx: &Context<'_>, params: &Value) -> ServerResult<Option<Value>> {
@@ -94,8 +104,11 @@ impl<T: ContainerType + ?Sized> ContainerType for Arc<T> {
 }
 
 impl<T: ContainerType + ?Sized> ContainerType for Box<T> {
-    async fn resolve_field(&self, ctx: &Context<'_>) -> ServerResult<Option<Value>> {
-        T::resolve_field(self, ctx).await
+    fn resolve_field<'a>(
+        &'a self,
+        ctx: &'a Context<'a>,
+    ) -> impl Future<Output = ServerResult<Option<Value>>> + Send + 'a {
+        T::resolve_field(self, ctx)
     }
 
     async fn find_entity(&self, ctx: &Context<'_>, params: &Value) -> ServerResult<Option<Value>> {
@@ -104,10 +117,15 @@ impl<T: ContainerType + ?Sized> ContainerType for Box<T> {
 }
 
 impl<T: ContainerType, E: Into<Error> + Send + Sync + Clone> ContainerType for Result<T, E> {
-    async fn resolve_field(&self, ctx: &Context<'_>) -> ServerResult<Option<Value>> {
+    fn resolve_field<'a>(
+        &'a self,
+        ctx: &'a Context<'a>,
+    ) -> impl Future<Output = ServerResult<Option<Value>>> + Send + 'a {
         match self {
-            Ok(value) => T::resolve_field(value, ctx).await,
-            Err(err) => Err(ctx.set_error_path(err.clone().into().into_server_error(ctx.item.pos))),
+            Ok(value) => futures_util::future::Either::Left(T::resolve_field(value, ctx)),
+            Err(err) => futures_util::future::Either::Right(std::future::ready(Err(
+                ctx.set_error_path(err.clone().into().into_server_error(ctx.item.pos))
+            ))),
         }
     }
 
@@ -236,7 +254,9 @@ pub fn resolve_container_dyn<'a>(
     ctx: &'a ContextSelectionSet<'a>,
     root: &dyn ErasedContainer<'a>,
     parallel: bool,
-) -> impl Future<Output = ServerResult<Value>> + Send + 'a {
+) -> impl Future<Output = ServerResult<Value>> + Send + use<'a> {
+    // `root` is only used to collect the fields, so the future does not
+    // borrow it, and a derived `resolve` can pass a reference to its local.
     let mut fields = Fields::new(ctx, parallel);
     let fields = fields.add_set_erased(ctx, root).map(|()| fields);
     join_fields(fields, parallel)

@@ -572,12 +572,12 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
         }
     };
     // Only hooks and code outside the executor call `resolve_field` itself.
-    // It awaits the boxed future: returning that future directly would need
-    // a single lifetime for `self` and the context, which the trait's
-    // signature does not give.
     let resolve_field_from_boxed = quote! {
-        async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
-            #crate_name::resolver_utils::ContainerType::resolve_field_boxed(self, ::std::clone::Clone::clone(ctx)).await
+        fn resolve_field<'__field>(
+            &'__field self,
+            ctx: &'__field #crate_name::Context<'__field>,
+        ) -> impl ::std::future::Future<Output = #crate_name::ServerResult<::std::option::Option<#crate_name::Value>>> + ::std::marker::Send + '__field {
+            #crate_name::resolver_utils::ContainerType::resolve_field_boxed(self, ::std::clone::Clone::clone(ctx))
         }
     };
     let resolve_field_boxed = quote! {
@@ -656,9 +656,7 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
                     })
                 }
 
-                async fn resolve(&self, ctx: &#crate_name::ContextSelectionSet<'_>, _field: &#crate_name::Positioned<#crate_name::parser::types::Field>) -> #crate_name::ServerResult<#crate_name::Value> {
-                    #resolve_erased
-                }
+                #resolve_erased
             }
 
             #erased_impl

@@ -264,9 +264,7 @@ pub fn generate(union_args: &args::Union) -> GeneratorResult<TokenStream> {
                     })
                 }
 
-                async fn resolve(&self, ctx: &#crate_name::ContextSelectionSet<'_>, _field: &#crate_name::Positioned<#crate_name::parser::types::Field>) -> #crate_name::ServerResult<#crate_name::Value> {
-                    #resolve_erased
-                }
+                #resolve_erased
             }
 
             #erased_impl

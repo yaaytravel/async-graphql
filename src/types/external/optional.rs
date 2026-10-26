@@ -1,4 +1,6 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, future::Future};
+
+use futures_util::{FutureExt, future::Either};
 
 use crate::{
     ContextSelectionSet, InputType, InputValueError, InputValueResult, OutputType, Positioned,
@@ -66,17 +68,19 @@ impl<T: OutputType + Sync> OutputType for Option<T> {
         }
     }
 
-    async fn resolve(
-        &self,
-        ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
-    ) -> ServerResult<Value> {
+    // A combinator rather than an `async fn`, so `Option<T>` adds no state
+    // machine of its own around `T`'s future.
+    fn resolve<'a>(
+        &'a self,
+        ctx: &'a ContextSelectionSet<'a>,
+        field: &'a Positioned<Field>,
+    ) -> impl Future<Output = ServerResult<Value>> + Send + 'a {
         match self {
-            Some(inner) => Ok(null_on_error(
-                ctx,
-                OutputType::resolve(inner, ctx, field).await,
-            )),
-            None => Ok(Value::Null),
+            Some(inner) => Either::Left(
+                OutputType::resolve(inner, ctx, field)
+                    .map(move |result| Ok(null_on_error(ctx, result))),
+            ),
+            None => Either::Right(std::future::ready(Ok(Value::Null))),
         }
     }
 }

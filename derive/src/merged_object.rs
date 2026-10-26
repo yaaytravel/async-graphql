@@ -198,9 +198,7 @@ pub fn generate(object_args: &args::MergedObject) -> GeneratorResult<TokenStream
                 })
             }
 
-            async fn resolve(&self, ctx: &#crate_name::ContextSelectionSet<'_>, _field: &#crate_name::Positioned<#crate_name::parser::types::Field>) -> #crate_name::ServerResult<#crate_name::Value> {
-                #resolve_container
-            }
+            #resolve_container
         }
 
         #erased_impl

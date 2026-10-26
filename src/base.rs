@@ -1,4 +1,6 @@
 use std::future::Future;
+
+use futures_util::future::Either;
 use std::{
     borrow::Cow,
     sync::{Arc, Weak},
@@ -93,11 +95,16 @@ pub trait OutputType: Send + Sync {
     }
 
     /// Resolve an output value to `async_graphql::Value`.
-    fn resolve(
-        &self,
-        ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
-    ) -> impl Future<Output = ServerResult<Value>> + Send;
+    ///
+    /// The value, the context and the field share one lifetime, so an
+    /// implementation can return another value's future directly instead of
+    /// wrapping it in a state machine of its own. An `async fn` with separate
+    /// lifetimes still implements it.
+    fn resolve<'a>(
+        &'a self,
+        ctx: &'a ContextSelectionSet<'a>,
+        field: &'a Positioned<Field>,
+    ) -> impl Future<Output = ServerResult<Value>> + Send + 'a;
 }
 
 impl<T: OutputType + ?Sized> OutputType for &T {
@@ -115,11 +122,11 @@ impl<T: OutputType + ?Sized> OutputType for &T {
 
     // Returns the inner future rather than wrapping it in another state machine.
     #[allow(clippy::trivially_copy_pass_by_ref)]
-    fn resolve(
-        &self,
-        ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
-    ) -> impl Future<Output = ServerResult<Value>> + Send {
+    fn resolve<'a>(
+        &'a self,
+        ctx: &'a ContextSelectionSet<'a>,
+        field: &'a Positioned<Field>,
+    ) -> impl Future<Output = ServerResult<Value>> + Send + 'a {
         T::resolve(*self, ctx, field)
     }
 }
@@ -138,14 +145,16 @@ impl<T: OutputType + Sync, E: Into<Error> + Send + Sync + Clone> OutputType for 
         self.as_ref().ok().and_then(T::resolve_now)
     }
 
-    async fn resolve(
-        &self,
-        ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
-    ) -> ServerResult<Value> {
+    fn resolve<'a>(
+        &'a self,
+        ctx: &'a ContextSelectionSet<'a>,
+        field: &'a Positioned<Field>,
+    ) -> impl Future<Output = ServerResult<Value>> + Send + 'a {
         match self {
-            Ok(value) => value.resolve(ctx, field).await,
-            Err(err) => Err(ctx.set_error_path(err.clone().into().into_server_error(field.pos))),
+            Ok(value) => Either::Left(value.resolve(ctx, field)),
+            Err(err) => Either::Right(std::future::ready(Err(
+                ctx.set_error_path(err.clone().into().into_server_error(field.pos))
+            ))),
         }
     }
 }
@@ -185,11 +194,11 @@ impl<T: OutputType + ?Sized> OutputType for Box<T> {
     }
 
     #[allow(clippy::trivially_copy_pass_by_ref)]
-    fn resolve(
-        &self,
-        ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
-    ) -> impl Future<Output = ServerResult<Value>> + Send {
+    fn resolve<'a>(
+        &'a self,
+        ctx: &'a ContextSelectionSet<'a>,
+        field: &'a Positioned<Field>,
+    ) -> impl Future<Output = ServerResult<Value>> + Send + 'a {
         T::resolve(self.as_ref(), ctx, field)
     }
 }
@@ -235,11 +244,11 @@ impl<T: OutputType + ?Sized> OutputType for Arc<T> {
 
     // Returns the inner future rather than wrapping it in another state machine.
     #[allow(clippy::trivially_copy_pass_by_ref)]
-    fn resolve(
-        &self,
-        ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
-    ) -> impl Future<Output = ServerResult<Value>> + Send {
+    fn resolve<'a>(
+        &'a self,
+        ctx: &'a ContextSelectionSet<'a>,
+        field: &'a Positioned<Field>,
+    ) -> impl Future<Output = ServerResult<Value>> + Send + 'a {
         T::resolve(&**self, ctx, field)
     }
 }

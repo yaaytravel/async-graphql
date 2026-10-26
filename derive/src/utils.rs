@@ -488,8 +488,16 @@ pub fn gen_erased_container(
         }
     };
     let parallel = !serial;
+    // Returns the container's future directly: `OutputType::resolve` gives
+    // `self` and the context one lifetime, so no state machine is needed here.
     let resolve = quote! {
-        #crate_name::resolver_utils::resolve_container_dyn(ctx, &self, #parallel).await
+        fn resolve<'__resolve>(
+            &'__resolve self,
+            ctx: &'__resolve #crate_name::ContextSelectionSet<'__resolve>,
+            _field: &'__resolve #crate_name::Positioned<#crate_name::parser::types::Field>,
+        ) -> impl ::std::future::Future<Output = #crate_name::ServerResult<#crate_name::Value>> + ::std::marker::Send + '__resolve {
+            #crate_name::resolver_utils::resolve_container_dyn(ctx, &self, #parallel)
+        }
     };
     let collect_all_fields = quote! {
         fn collect_all_fields<'__erased>(

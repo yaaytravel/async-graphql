@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::future::Future;
 
 use crate::{
     ContextSelectionSet, InputType, InputValueError, InputValueResult, OutputType, Positioned,
@@ -66,11 +67,11 @@ impl<T: OutputType, const N: usize> OutputType for [T; N] {
         Self::qualified_type_name()
     }
 
-    async fn resolve(
-        &self,
-        ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
-    ) -> ServerResult<Value> {
-        resolve_list(ctx, field, self.iter(), Some(self.len())).await
+    fn resolve<'a>(
+        &'a self,
+        ctx: &'a ContextSelectionSet<'a>,
+        field: &'a Positioned<Field>,
+    ) -> impl Future<Output = ServerResult<Value>> + Send + 'a {
+        resolve_list(ctx, field, self.iter(), Some(self.len()))
     }
 }

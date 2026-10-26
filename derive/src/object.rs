@@ -862,7 +862,19 @@ pub fn generate(
     // A trait object's lifetime defaults differ between `impl dyn Trait` and
     // `&'a dyn Trait`, so those keep the generic resolution path.
     let (erased_impl, resolve_erased, collect_erased) = if is_trait_object(&item_impl.self_ty) {
-        (quote!(), resolve_container.clone(), quote!())
+        (
+            quote!(),
+            quote! {
+                async fn resolve(
+                    &self,
+                    ctx: &#crate_name::ContextSelectionSet<'_>,
+                    _field: &#crate_name::Positioned<#crate_name::parser::types::Field>,
+                ) -> #crate_name::ServerResult<#crate_name::Value> {
+                    #resolve_container
+                }
+            },
+            quote!(),
+        )
     } else {
         gen_erased_container(
             &crate_name,
@@ -884,10 +896,27 @@ pub fn generate(
                 impl #impl_generics #crate_name::resolver_utils::ContainerType for #self_ty #where_clause {
                     #collect_erased
 
-                    async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
-                        #resolve_field_resolver_match
-                        #(#flattened_resolvers)*
-                        ::std::result::Result::Ok(::std::option::Option::None)
+                    // One boxed async block resolves every field. The erased
+                    // container boxes fields through `resolve_field_boxed`, so
+                    // generating it here avoids a second state machine per type
+                    // that would only box this one.
+                    fn resolve_field_boxed<'__field>(
+                        &'__field self,
+                        ctx: #crate_name::Context<'__field>,
+                    ) -> #crate_name::resolver_utils::BoxFieldResult<'__field> {
+                        ::std::boxed::Box::pin(async move {
+                            let ctx = &ctx;
+                            #resolve_field_resolver_match
+                            #(#flattened_resolvers)*
+                            ::std::result::Result::Ok(::std::option::Option::None)
+                        })
+                    }
+
+                    fn resolve_field<'__field>(
+                        &'__field self,
+                        ctx: &'__field #crate_name::Context<'__field>,
+                    ) -> impl ::std::future::Future<Output = #crate_name::ServerResult<::std::option::Option<#crate_name::Value>>> + ::std::marker::Send + '__field {
+                        #crate_name::resolver_utils::ContainerType::resolve_field_boxed(self, ::std::clone::Clone::clone(ctx))
                     }
 
                     #find_entity
@@ -917,13 +946,7 @@ pub fn generate(
                         ty
                     }
 
-                    async fn resolve(
-                        &self,
-                        ctx: &#crate_name::ContextSelectionSet<'_>,
-                        _field: &#crate_name::Positioned<#crate_name::parser::types::Field>
-                    ) -> #crate_name::ServerResult<#crate_name::Value> {
-                        #resolve_erased
-                    }
+                    #resolve_erased
                 }
 
                 #erased_impl

@@ -22,11 +22,11 @@ where
     }
 
     // Returns the inner future rather than wrapping it in another state machine.
-    fn resolve(
-        &self,
-        ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
-    ) -> impl Future<Output = ServerResult<Value>> + Send {
+    fn resolve<'a>(
+        &'a self,
+        ctx: &'a ContextSelectionSet<'a>,
+        field: &'a Positioned<Field>,
+    ) -> impl Future<Output = ServerResult<Value>> + Send + 'a {
         self.as_ref().resolve(ctx, field)
     }
 }
