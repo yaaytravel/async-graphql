@@ -628,23 +628,32 @@ impl<'a, T> ContextBase<'a, T> {
         name: &str,
         default: Option<fn() -> Q>,
     ) -> ServerResult<(Pos, Q)> {
+        let (pos, value) = match (self.find_param_value(arguments, name)?, default) {
+            (None, Some(default)) => return Ok((Pos::default(), default())),
+            (found, _) => found.unwrap_or_default(),
+        };
+        InputType::parse(value)
+            .map(|value| (pos, value))
+            .map_err(|e| e.into_server_error(pos))
+    }
+
+    /// Finds and resolves an argument's value, or `None` when the argument is
+    /// absent. Not generic over the argument type, so it is compiled once per
+    /// context type rather than once per argument type.
+    fn find_param_value(
+        &self,
+        arguments: &[(Positioned<Name>, Positioned<InputValue>)],
+        name: &str,
+    ) -> ServerResult<Option<(Pos, Option<Value>)>> {
         let value = arguments
             .iter()
             .find(|(n, _)| n.node.as_str() == name)
             .map(|(_, value)| value)
             .cloned();
-        if value.is_none()
-            && let Some(default) = default
-        {
-            return Ok((Pos::default(), default()));
+        match value {
+            Some(value) => Ok(Some((value.pos, self.resolve_input_value(value)?))),
+            None => Ok(None),
         }
-        let (pos, value) = match value {
-            Some(value) => (value.pos, self.resolve_input_value(value)?),
-            None => (Pos::default(), None),
-        };
-        InputType::parse(value)
-            .map(|value| (pos, value))
-            .map_err(|e| e.into_server_error(pos))
     }
 
     #[doc(hidden)]

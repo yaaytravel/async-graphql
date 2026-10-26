@@ -180,6 +180,16 @@ pub struct InputValueError<T> {
     phantom: PhantomData<T>,
 }
 
+/// The message of an input error propagated from type `from` to type `to`.
+/// Not generic, so it is compiled once rather than once per pair of types.
+fn propagated_message(message: String, from: &str, to: &str) -> String {
+    if from != to {
+        format!(r#"{} (occurred while parsing "{}")"#, message, to)
+    } else {
+        message
+    }
+}
+
 impl<T: InputType> InputValueError<T> {
     fn new(message: String, extensions: Option<ErrorExtensionValues>) -> Self {
         Self {
@@ -216,18 +226,10 @@ impl<T: InputType> InputValueError<T> {
 
     /// Propagate the error message to a different type.
     pub fn propagate<U: InputType>(self) -> InputValueError<U> {
-        if T::type_name() != U::type_name() {
-            InputValueError::new(
-                format!(
-                    r#"{} (occurred while parsing "{}")"#,
-                    self.message,
-                    U::type_name()
-                ),
-                self.extensions,
-            )
-        } else {
-            InputValueError::new(self.message, self.extensions)
-        }
+        InputValueError::new(
+            propagated_message(self.message, &T::type_name(), &U::type_name()),
+            self.extensions,
+        )
     }
 
     /// Set an extension value.
