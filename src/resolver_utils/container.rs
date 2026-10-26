@@ -38,6 +38,14 @@ pub trait ContainerType: OutputType {
         ctx: &Context<'_>,
     ) -> impl Future<Output = ServerResult<Option<Value>>> + Send;
 
+    /// Resolves a field into a boxed future that owns its context. The erased
+    /// containers the derives generate resolve fields through this, so a
+    /// container can return a field's future without an `async fn` of its own.
+    #[doc(hidden)]
+    fn resolve_field_boxed<'a>(&'a self, ctx: Context<'a>) -> BoxFieldResult<'a> {
+        Box::pin(async move { self.resolve_field(&ctx).await })
+    }
+
     /// Resolves a field without a future, when its value needs neither the
     /// selection set nor any async work, as for a `SimpleObject` field holding a
     /// scalar. Returns `None` to resolve it through `resolve_field` instead.
@@ -205,6 +213,26 @@ impl<'a, T: ContainerType + ?Sized> ErasedContainer<'a> for GenericContainer<'a,
     ) -> ServerResult<()> {
         T::collect_all_fields(self.0, ctx, fields)
     }
+}
+
+/// The future for a field holding `value`, resolved with the field's
+/// selection set. Generic only over the field's type, so every field of that
+/// type, in any container, shares it.
+#[doc(hidden)]
+pub fn resolve_field_value<'a, T: OutputType + ?Sized>(
+    value: &'a T,
+    ctx: Context<'a>,
+) -> BoxFieldResult<'a> {
+    Box::pin(async move {
+        OutputType::resolve(
+            value,
+            &ctx.with_selection_set(&ctx.item.node.selection_set),
+            ctx.item,
+        )
+        .await
+        .map(Some)
+        .map_err(|err| ctx.set_error_path(err))
+    })
 }
 
 /// Resolve an container by executing each of the fields concurrently.

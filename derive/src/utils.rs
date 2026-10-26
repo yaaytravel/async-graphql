@@ -441,10 +441,11 @@ pub fn gen_erased_container(
                 ctx: #crate_name::Context<'__erased>,
                 hooks: bool,
             ) -> #crate_name::resolver_utils::BoxFieldResult<'__erased> {
-                // Both helpers are generic so that rustc takes `Send` from the
+                // The helper is generic so that rustc takes `Send` from the
                 // `ContainerType::resolve_field` signature instead of inferring it
                 // from each type's resolver state machine, which is slow to check.
-                // Being declared here, they are still distinct for every type.
+                // Being declared here, it is still distinct for every type. Without
+                // hooks, `ContainerType::resolve_field_boxed`'s default does the same.
 
                 // Polls the resolver through a future type local to this impl:
                 // `Pin<&mut F>`'s own `Future` impl is one generic shared by every
@@ -460,13 +461,6 @@ pub fn gen_erased_container(
                     ) -> ::std::task::Poll<Self::Output> {
                         self.0.as_mut().poll(cx)
                     }
-                }
-
-                fn resolve<'a, C: #crate_name::resolver_utils::ContainerType + ?::std::marker::Sized>(
-                    root: &'a C,
-                    ctx: #crate_name::Context<'a>,
-                ) -> #crate_name::resolver_utils::BoxFieldResult<'a> {
-                    ::std::boxed::Box::pin(async move { root.resolve_field(&ctx).await })
                 }
 
                 fn resolve_with_hooks<'a, C: #crate_name::resolver_utils::ContainerType + ?::std::marker::Sized>(
@@ -488,7 +482,7 @@ pub fn gen_erased_container(
                 if hooks {
                     resolve_with_hooks(*self, ctx)
                 } else {
-                    resolve(*self, ctx)
+                    #crate_name::resolver_utils::ContainerType::resolve_field_boxed(*self, ctx)
                 }
             }
 

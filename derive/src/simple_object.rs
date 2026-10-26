@@ -97,6 +97,7 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
     let mut getters = Vec::new();
     let mut resolvers = Vec::new();
     let mut now_resolvers = Vec::new();
+    let mut boxed_resolvers = Vec::new();
     let mut flattened_resolvers = Vec::new();
     let mut schema_fields = Vec::new();
 
@@ -386,6 +387,22 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
                     return #resolve_value;
                 }
             });
+            // The boxed resolver shares one future per field type for plain
+            // borrowed fields, and needs its own async block only for the rest.
+            boxed_resolvers.push(if guard.is_none() && !owned && derived.is_none() {
+                quote! {
+                    #field_name => #crate_name::resolver_utils::resolve_field_value(&self.#base_ident, ctx),
+                }
+            } else {
+                quote! {
+                    #field_name => ::std::boxed::Box::pin(async move {
+                        let ctx = &ctx;
+                        #guard
+                        let obj: #ty = #block;
+                        return #resolve_value;
+                    }),
+                }
+            });
         } else {
             flattened_resolvers.push(quote! {
                 if let ::std::option::Option::Some(value) = #crate_name::ContainerType::resolve_field(&self.#ident, ctx).await? {
@@ -532,6 +549,47 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
         }
     };
 
+    // Fields resolve through `resolve_field_boxed`, a plain function returning
+    // each field's boxed future, rather than through one `async fn` per type
+    // holding every field's future in its state machine.
+    let fallback = if flattened_resolvers.is_empty() && !object_args.complex {
+        quote!(::std::boxed::Box::pin(::std::future::ready(
+            ::std::result::Result::Ok(::std::option::Option::None)
+        )))
+    } else {
+        quote! {
+            ::std::boxed::Box::pin(async move {
+                let ctx = &ctx;
+                #(#flattened_resolvers)*
+                #complex_resolver
+                ::std::result::Result::Ok(::std::option::Option::None)
+            })
+        }
+    };
+    // Only hooks and code outside the executor call `resolve_field` itself.
+    // It awaits the boxed future: returning that future directly would need
+    // a single lifetime for `self` and the context, which the trait's
+    // signature does not give.
+    let resolve_field_from_boxed = quote! {
+        async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
+            #crate_name::resolver_utils::ContainerType::resolve_field_boxed(self, ::std::clone::Clone::clone(ctx)).await
+        }
+    };
+    let resolve_field_boxed = quote! {
+        fn resolve_field_boxed<'__field>(
+            &'__field self,
+            ctx: #crate_name::Context<'__field>,
+        ) -> #crate_name::resolver_utils::BoxFieldResult<'__field> {
+            let item = ctx.item;
+            match item.node.name.node.as_str() {
+                #(#boxed_resolvers)*
+                _ => #fallback,
+            }
+        }
+
+        #resolve_field_from_boxed
+    };
+
     let field_match = if resolvers.is_empty() {
         quote!()
     } else {
@@ -569,12 +627,7 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
                 #collect_erased
                 #resolve_field_now
 
-                async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
-                    #field_match
-                    #(#flattened_resolvers)*
-                    #complex_resolver
-                    ::std::result::Result::Ok(::std::option::Option::None)
-                }
+                #resolve_field_boxed
             }
 
             #[allow(clippy::all, clippy::pedantic)]
