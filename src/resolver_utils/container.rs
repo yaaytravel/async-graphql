@@ -358,6 +358,18 @@ impl Future for JoinFields<'_> {
     }
 }
 
+/// Wraps a field's boxed future so that it runs through the request's
+/// extensions and the field's custom directives. Not generic, so the derives
+/// share it for every container type.
+#[doc(hidden)]
+pub fn resolve_boxed_field_with_hooks<'a>(
+    ctx: Context<'a>,
+    type_name: Cow<'static, str>,
+    mut resolve_fut: BoxFieldResult<'a>,
+) -> BoxFieldResult<'a> {
+    Box::pin(async move { resolve_field_with_hooks(&ctx, type_name, &mut resolve_fut).await })
+}
+
 /// Runs a field's resolver through the request's extensions and the field's
 /// custom directives.
 #[doc(hidden)]

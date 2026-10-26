@@ -468,46 +468,18 @@ pub fn gen_erased_container(
                 ctx: #crate_name::Context<'__erased>,
                 hooks: bool,
             ) -> #crate_name::resolver_utils::BoxFieldResult<'__erased> {
-                // The helper is generic so that rustc takes `Send` from the
-                // `ContainerType::resolve_field` signature instead of inferring it
-                // from each type's resolver state machine, which is slow to check.
-                // Being declared here, it is still distinct for every type. Without
-                // hooks, `ContainerType::resolve_field_boxed`'s default does the same.
-
-                // Polls the resolver through a future type local to this impl:
-                // `Pin<&mut F>`'s own `Future` impl is one generic shared by every
-                // type, and would nest once per type like any other.
-                struct HookedField<'f, F>(::std::pin::Pin<&'f mut F>);
-
-                impl<F: ::std::future::Future> ::std::future::Future for HookedField<'_, F> {
-                    type Output = F::Output;
-
-                    fn poll(
-                        mut self: ::std::pin::Pin<&mut Self>,
-                        cx: &mut ::std::task::Context<'_>,
-                    ) -> ::std::task::Poll<Self::Output> {
-                        self.0.as_mut().poll(cx)
-                    }
-                }
-
-                fn resolve_with_hooks<'a, C: #crate_name::resolver_utils::ContainerType + ?::std::marker::Sized>(
-                    root: &'a C,
-                    ctx: #crate_name::Context<'a>,
-                ) -> #crate_name::resolver_utils::BoxFieldResult<'a> {
-                    ::std::boxed::Box::pin(async move {
-                        let resolve_fut = root.resolve_field(&ctx);
-                        let mut resolve_fut = HookedField(::std::pin::pin!(resolve_fut));
-                        #crate_name::resolver_utils::resolve_field_with_hooks(
-                            &ctx,
-                            C::type_name(),
-                            &mut resolve_fut,
-                        )
-                        .await
-                    })
-                }
-
+                // Both paths start from the field's boxed future, so the hooks
+                // wrapper is one non-generic function shared by every type.
                 if hooks {
-                    resolve_with_hooks(*self, ctx)
+                    let resolve_fut = #crate_name::resolver_utils::ContainerType::resolve_field_boxed(
+                        *self,
+                        ::std::clone::Clone::clone(&ctx),
+                    );
+                    #crate_name::resolver_utils::resolve_boxed_field_with_hooks(
+                        ctx,
+                        <#self_ty as #crate_name::OutputType>::type_name(),
+                        resolve_fut,
+                    )
                 } else {
                     #crate_name::resolver_utils::ContainerType::resolve_field_boxed(*self, ctx)
                 }
