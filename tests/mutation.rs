@@ -251,3 +251,64 @@ pub async fn test_serial_merged_object() {
         .await;
     assert_eq!(&*list.lock().await, &[1, 2, 3, 4]);
 }
+
+#[tokio::test]
+pub async fn test_serial_simple_object_field_reads_after_previous_fields() {
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    // A scalar whose value is read when it is resolved.
+    #[derive(Clone)]
+    struct Counter(Arc<AtomicI32>);
+
+    #[Scalar]
+    impl ScalarType for Counter {
+        fn parse(_value: Value) -> InputValueResult<Self> {
+            Err(InputValueError::custom("output only"))
+        }
+
+        fn to_value(&self) -> Value {
+            Value::from(self.0.load(Ordering::SeqCst))
+        }
+    }
+
+    #[derive(SimpleObject)]
+    #[graphql(serial, complex)]
+    struct Mutation {
+        current: Counter,
+    }
+
+    #[ComplexObject]
+    impl Mutation {
+        async fn bump(&self) -> i32 {
+            self.current.0.fetch_add(1, Ordering::SeqCst) + 1
+        }
+    }
+
+    struct Query;
+
+    #[Object]
+    impl Query {
+        async fn value(&self) -> i32 {
+            0
+        }
+    }
+
+    let schema = Schema::new(
+        Query,
+        Mutation {
+            current: Counter(Arc::new(AtomicI32::new(0))),
+        },
+        EmptySubscription,
+    );
+    // `current` is selected after `bump`, so in a serial container it must
+    // see the bump.
+    assert_eq!(
+        schema
+            .execute("mutation { bump current }")
+            .await
+            .into_result()
+            .unwrap()
+            .data,
+        value!({ "bump": 1, "current": 1 })
+    );
+}

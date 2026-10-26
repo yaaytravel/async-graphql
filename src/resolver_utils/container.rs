@@ -212,7 +212,7 @@ pub fn resolve_container<'a, T: ContainerType + ?Sized>(
     ctx: &ContextSelectionSet<'a>,
     root: &'a T,
 ) -> impl Future<Output = ServerResult<Value>> + Send {
-    join_fields(Fields::collect(ctx, root), true)
+    join_fields(Fields::collect(ctx, root, true), true)
 }
 
 /// Resolve an container by executing each of the fields serially.
@@ -220,7 +220,7 @@ pub fn resolve_container_serial<'a, T: ContainerType + ?Sized>(
     ctx: &ContextSelectionSet<'a>,
     root: &'a T,
 ) -> impl Future<Output = ServerResult<Value>> + Send {
-    join_fields(Fields::collect(ctx, root), false)
+    join_fields(Fields::collect(ctx, root, false), false)
 }
 
 /// Resolve an erased container, concurrently or serially. The derive macros
@@ -231,7 +231,7 @@ pub fn resolve_container_dyn<'a>(
     root: &dyn ErasedContainer<'a>,
     parallel: bool,
 ) -> impl Future<Output = ServerResult<Value>> + Send + 'a {
-    let mut fields = Fields::new(ctx);
+    let mut fields = Fields::new(ctx, parallel);
     let fields = fields.add_set_erased(ctx, root).map(|()| fields);
     join_fields(fields, parallel)
 }
@@ -423,21 +423,27 @@ pub struct Fields<'a> {
     /// fragment selection sets are collected through temporary contexts that
     /// carry a copy of the same path.
     parent_path: Option<&'a QueryPathNode<'a>>,
+    /// Whether a field that resolves without a future may get its value while
+    /// the fields are collected. Not for serial containers, where a field must
+    /// only resolve once every field before it has.
+    eager: bool,
 }
 
 impl<'a> Fields<'a> {
-    fn new(ctx: &'a ContextSelectionSet<'a>) -> Self {
+    fn new(ctx: &'a ContextSelectionSet<'a>, eager: bool) -> Self {
         Fields {
             futures: Vec::with_capacity(ctx.item.node.items.len()),
             parent_path: ctx.path_node.as_ref(),
+            eager,
         }
     }
 
     fn collect<T: ContainerType + ?Sized>(
         ctx: &'a ContextSelectionSet<'a>,
         root: &'a T,
+        eager: bool,
     ) -> ServerResult<Self> {
-        let mut fields = Fields::new(ctx);
+        let mut fields = Fields::new(ctx, eager);
         fields.add_set(ctx, root)?;
         Ok(fields)
     }
@@ -494,7 +500,10 @@ impl<'a> Fields<'a> {
 
                     let hooks = ctx.query_env.extensions.has_resolve_hooks()
                         || !field.node.directives.is_empty();
-                    if !hooks && let Some(value) = root.erased_resolve_field_now(&ctx_field) {
+                    if self.eager
+                        && !hooks
+                        && let Some(value) = root.erased_resolve_field_now(&ctx_field)
+                    {
                         self.futures.push(FieldFuture {
                             name: field_name,
                             state: FieldState::Done(value),
