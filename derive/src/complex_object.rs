@@ -13,9 +13,9 @@ use crate::{
     output_type::OutputType,
     utils::{
         GeneratorResult, extract_input_args, gen_boxed_trait, gen_deprecation, gen_directive_calls,
-        generate_default, generate_guards, get_cfg_attrs, get_crate_path, get_rustdoc,
-        get_type_path_and_name, parse_complexity_expr, parse_graphql_attrs, remove_graphql_attrs,
-        visible_fn,
+        gen_resolve_field_value, generate_default, generate_guards, get_cfg_attrs, get_crate_path,
+        get_rustdoc, get_type_path_and_name, parse_complexity_expr, parse_graphql_attrs,
+        remove_graphql_attrs, visible_fn,
     },
 };
 
@@ -547,6 +547,7 @@ pub fn generate(
                 None => None,
             };
 
+            let resolve_value = gen_resolve_field_value(&crate_name, quote!(&obj), true);
             let resolve_block = if is_async {
                 quote! {
                     let f = async move {
@@ -565,7 +566,7 @@ pub fn generate(
                     #(#get_params)*
                     #guard
                     let obj = #resolve_obj.map_err(|err| ctx.set_error_path(err))?;
-                    return #crate_name::resolver_utils::resolve_simple_field_value(ctx, &obj).await;
+                    return #resolve_value;
                 }
             };
 

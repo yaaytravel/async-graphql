@@ -14,7 +14,7 @@ use crate::{
     output_type::OutputType,
     utils::{
         GeneratorResult, RemoveLifetime, gen_boxed_trait, gen_deprecation, gen_directive_calls,
-        generate_default, get_crate_path, get_rustdoc, visible_fn,
+        gen_erased_container, generate_default, get_crate_path, get_rustdoc, visible_fn,
     },
 };
 
@@ -487,6 +487,13 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
 
     let visible = visible_fn(&interface_args.visible);
     let field_count = schema_fields.len();
+    let (erased_impl, resolve_erased) = gen_erased_container(
+        &crate_name,
+        &quote!(#ident #ty_generics),
+        &interface_args.generics,
+        false,
+    );
+
     let expanded = quote! {
         #(#type_into_impls)*
 
@@ -555,9 +562,11 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
                 ctx: &#crate_name::ContextSelectionSet<'_>,
                 _field: &#crate_name::Positioned<#crate_name::parser::types::Field>,
             ) -> #crate_name::ServerResult<#crate_name::Value> {
-                #crate_name::resolver_utils::resolve_container(ctx, self).await
+                #resolve_erased
             }
         }
+
+        #erased_impl
 
         impl #impl_generics #crate_name::InterfaceType for #ident #ty_generics #where_clause {}
     };

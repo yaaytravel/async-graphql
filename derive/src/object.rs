@@ -13,9 +13,9 @@ use crate::{
     output_type::OutputType,
     utils::{
         GeneratorResult, extract_input_args, gen_boxed_trait, gen_deprecation, gen_directive_calls,
-        generate_default, generate_guards, get_cfg_attrs, get_crate_path, get_rustdoc,
-        get_type_path_and_name, parse_complexity_expr, parse_graphql_attrs, remove_graphql_attrs,
-        visible_fn,
+        gen_erased_container, gen_resolve_field_value, generate_default, generate_guards,
+        get_cfg_attrs, get_crate_path, get_rustdoc, get_type_path_and_name, is_trait_object,
+        parse_complexity_expr, parse_graphql_attrs, remove_graphql_attrs, visible_fn,
     },
     validators::Validators,
 };
@@ -691,19 +691,25 @@ pub fn generate(
                 };
 
                 let resolve_body = if is_async {
+                    let resolve_value = gen_resolve_field_value(&crate_name, quote!(&obj), false);
                     quote! {
-                        return #crate_name::resolver_utils::resolve_field_async(
-                            ctx,
-                            self.#field_ident(ctx, #(#use_params),*)
-                        )
-                        .await;
+                        let obj = self.#field_ident(ctx, #(#use_params),*)
+                            .await
+                            .map_err(|err| {
+                                ctx.set_error_path(
+                                    ::std::convert::Into::<#crate_name::Error>::into(err)
+                                        .into_server_error(ctx.item.pos),
+                                )
+                            })?;
+                        return #resolve_value;
                     }
                 } else {
+                    let resolve_value = gen_resolve_field_value(&crate_name, quote!(&obj), true);
                     match &ty {
                         OutputType::Value(_) => {
                             quote! {
                                 let obj: #schema_ty = self.#field_ident(ctx, #(#use_params),*);
-                                return #crate_name::resolver_utils::resolve_simple_field_value(ctx, &obj).await;
+                                return #resolve_value;
                             }
                         }
                         OutputType::Result(_) => {
@@ -714,7 +720,7 @@ pub fn generate(
                                             .into_server_error(ctx.item.pos);
                                         ctx.set_error_path(err)
                                     })?;
-                                return #crate_name::resolver_utils::resolve_simple_field_value(ctx, &obj).await;
+                                return #resolve_value;
                             }
                         }
                     }
@@ -835,6 +841,19 @@ pub fn generate(
 
     let resolve_field_resolver_match = generate_field_match(resolvers)?;
 
+    // A trait object's lifetime defaults differ between `impl dyn Trait` and
+    // `&'a dyn Trait`, so those keep the generic resolution path.
+    let (erased_impl, resolve_erased) = if is_trait_object(&item_impl.self_ty) {
+        (quote!(), resolve_container.clone())
+    } else {
+        gen_erased_container(
+            &crate_name,
+            &quote!(#self_ty),
+            &item_impl.generics,
+            object_args.serial,
+        )
+    };
+
     let expanded = if object_args.concretes.is_empty() {
         quote! {
             #item_impl
@@ -892,9 +911,11 @@ pub fn generate(
                         ctx: &#crate_name::ContextSelectionSet<'_>,
                         _field: &#crate_name::Positioned<#crate_name::parser::types::Field>
                     ) -> #crate_name::ServerResult<#crate_name::Value> {
-                        #resolve_container
+                        #resolve_erased
                     }
                 }
+
+                #erased_impl
 
                 impl #impl_generics #crate_name::ObjectType for #self_ty #where_clause {}
             };

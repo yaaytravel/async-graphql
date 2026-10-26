@@ -10,8 +10,9 @@ use crate::{
         self, RenameRuleExt, RenameTarget, Resolvability, SimpleObjectField, TypeDirectiveLocation,
     },
     utils::{
-        GeneratorResult, gen_boxed_trait, gen_deprecation, gen_directive_calls, generate_guards,
-        get_crate_path, get_rustdoc, parse_complexity_expr, visible_fn,
+        GeneratorResult, gen_boxed_trait, gen_deprecation, gen_directive_calls,
+        gen_erased_container, gen_resolve_field_value, generate_guards, get_crate_path,
+        get_rustdoc, parse_complexity_expr, visible_fn,
     },
 };
 
@@ -95,6 +96,7 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
     };
     let mut getters = Vec::new();
     let mut resolvers = Vec::new();
+    let mut flattened_resolvers = Vec::new();
     let mut schema_fields = Vec::new();
 
     let mut processed_fields: Vec<SimpleObjectFieldGenerator> = vec![];
@@ -365,15 +367,19 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
                  }
             });
 
+            // A borrowed field is passed as is, so `&T` is resolved as `T`
+            // rather than through the blanket `OutputType for &T`.
+            let value = if owned { quote!(&obj) } else { quote!(obj) };
+            let resolve_value = gen_resolve_field_value(&crate_name, value, true);
             resolvers.push(quote! {
-                if ctx.item.node.name.node == #field_name {
+                #field_name => {
                     #guard
                     let obj: #ty = #block;
-                    return #crate_name::resolver_utils::resolve_simple_field_value(ctx, &obj).await;
+                    return #resolve_value;
                 }
             });
         } else {
-            resolvers.push(quote! {
+            flattened_resolvers.push(quote! {
                 if let ::std::option::Option::Some(value) = #crate_name::ContainerType::resolve_field(&self.#ident, ctx).await? {
                     return ::std::result::Result::Ok(std::option::Option::Some(value));
                 }
@@ -381,7 +387,7 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
         }
     }
 
-    if !object_args.fake && resolvers.is_empty() {
+    if !object_args.fake && resolvers.is_empty() && flattened_resolvers.is_empty() {
         return Err(Error::new_spanned(
             ident,
             "A GraphQL Object type must define one or more fields.",
@@ -505,11 +511,29 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
         };
     }
 
+    let field_match = if resolvers.is_empty() {
+        quote!()
+    } else {
+        quote! {
+            match ctx.item.node.name.node.as_str() {
+                #(#resolvers)*
+                _ => {}
+            }
+        }
+    };
+
     let resolve_container = if object_args.serial {
         quote! { #crate_name::resolver_utils::resolve_container_serial(ctx, self).await }
     } else {
         quote! { #crate_name::resolver_utils::resolve_container(ctx, self).await }
     };
+
+    let (erased_impl, resolve_erased) = gen_erased_container(
+        &crate_name,
+        &quote!(#ident #ty_generics),
+        &object_args.generics,
+        object_args.serial,
+    );
 
     let expanded = if object_args.concretes.is_empty() {
         quote! {
@@ -522,7 +546,8 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
             #boxed_trait
             impl #impl_generics #crate_name::resolver_utils::ContainerType for #ident #ty_generics #where_clause {
                 async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
-                    #(#resolvers)*
+                    #field_match
+                    #(#flattened_resolvers)*
                     #complex_resolver
                     ::std::result::Result::Ok(::std::option::Option::None)
                 }
@@ -552,9 +577,11 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
                 }
 
                 async fn resolve(&self, ctx: &#crate_name::ContextSelectionSet<'_>, _field: &#crate_name::Positioned<#crate_name::parser::types::Field>) -> #crate_name::ServerResult<#crate_name::Value> {
-                    #resolve_container
+                    #resolve_erased
                 }
             }
+
+            #erased_impl
 
             impl #impl_generics #crate_name::ObjectType for #ident #ty_generics #where_clause {}
         }
@@ -607,7 +634,8 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
                 }
 
                 async fn __internal_resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> where Self: #crate_name::ContainerType {
-                    #(#resolvers)*
+                    #field_match
+                    #(#flattened_resolvers)*
                     ::std::result::Result::Ok(::std::option::Option::None)
                 }
             }

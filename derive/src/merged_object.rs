@@ -7,8 +7,8 @@ use syn::{Error, LitInt};
 use crate::{
     args::{self, RenameTarget, TypeDirectiveLocation},
     utils::{
-        GeneratorResult, gen_boxed_trait, gen_directive_calls, get_crate_path, get_rustdoc,
-        visible_fn,
+        GeneratorResult, gen_boxed_trait, gen_directive_calls, gen_erased_container,
+        get_crate_path, get_rustdoc, visible_fn,
     },
 };
 
@@ -135,11 +135,12 @@ pub fn generate(object_args: &args::MergedObject) -> GeneratorResult<TokenStream
     };
 
     let visible = visible_fn(&object_args.visible);
-    let resolve_container = if object_args.serial {
-        quote! { #crate_name::resolver_utils::resolve_container_serial(ctx, self).await }
-    } else {
-        quote! { #crate_name::resolver_utils::resolve_container(ctx, self).await }
-    };
+    let (erased_impl, resolve_container) = gen_erased_container(
+        &crate_name,
+        &quote!(#ident #ty_generics),
+        &object_args.generics,
+        object_args.serial,
+    );
 
     let expanded = quote! {
         #[allow(clippy::all, clippy::pedantic)]
@@ -202,6 +203,8 @@ pub fn generate(object_args: &args::MergedObject) -> GeneratorResult<TokenStream
                 #resolve_container
             }
         }
+
+        #erased_impl
 
         impl #impl_generics #crate_name::ObjectType for #ident #ty_generics #where_clause {}
     };

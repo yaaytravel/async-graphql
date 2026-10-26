@@ -131,16 +131,28 @@ impl<T: ContainerType, E: Into<Error> + Send + Sync + Clone> ContainerType for R
     }
 }
 
-type BoxFieldResult<'a> = Pin<Box<dyn Future<Output = ServerResult<Option<Value>>> + Send + 'a>>;
+#[doc(hidden)]
+pub type BoxFieldResult<'a> =
+    Pin<Box<dyn Future<Output = ServerResult<Option<Value>>> + Send + 'a>>;
 
 /// Object-safe view of a borrowed [`ContainerType`], so field collection is
 /// compiled once instead of once per GraphQL type.
-trait ErasedContainer<'a>: Send + Sync {
+///
+/// The derive macros implement it for `&Self` on every type they generate, so
+/// resolving one object type and then the next goes through no generic library
+/// code. Generic code instantiated once per type would otherwise nest once per
+/// type along a chain of object types and hit rustc's recursion limit.
+/// Hand-written containers go through [`GenericContainer`] instead.
+#[doc(hidden)]
+pub trait ErasedContainer<'a>: Send + Sync {
     /// Resolves a field. With `hooks`, the field also runs through the
     /// request's extensions and the field's custom directives.
     fn erased_resolve_field(&self, ctx: Context<'a>, hooks: bool) -> BoxFieldResult<'a>;
+    /// The container's GraphQL type name.
     fn erased_type_name(&self) -> Cow<'static, str>;
+    /// The container's concrete type name for `__typename` and fragments.
     fn erased_introspection_type_name(&self) -> Cow<'static, str>;
+    /// Collects the container's fields selected by `ctx`.
     fn erased_collect_all_fields(
         &self,
         ctx: &ContextSelectionSet<'a>,
@@ -148,9 +160,14 @@ trait ErasedContainer<'a>: Send + Sync {
     ) -> ServerResult<()>;
 }
 
-impl<'a, T: ContainerType + ?Sized> ErasedContainer<'a> for &'a T {
+/// The generic [`ErasedContainer`] for containers the derive macros did not
+/// generate, such as hand-written `ContainerType` impls.
+#[doc(hidden)]
+pub struct GenericContainer<'a, T: ?Sized>(pub &'a T);
+
+impl<'a, T: ContainerType + ?Sized> ErasedContainer<'a> for GenericContainer<'a, T> {
     fn erased_resolve_field(&self, ctx: Context<'a>, hooks: bool) -> BoxFieldResult<'a> {
-        let root = *self;
+        let root = self.0;
         if hooks {
             Box::pin(async move {
                 let resolve_fut = root.resolve_field(&ctx);
@@ -167,7 +184,7 @@ impl<'a, T: ContainerType + ?Sized> ErasedContainer<'a> for &'a T {
     }
 
     fn erased_introspection_type_name(&self) -> Cow<'static, str> {
-        T::introspection_type_name(*self)
+        T::introspection_type_name(self.0)
     }
 
     fn erased_collect_all_fields(
@@ -175,7 +192,7 @@ impl<'a, T: ContainerType + ?Sized> ErasedContainer<'a> for &'a T {
         ctx: &ContextSelectionSet<'a>,
         fields: &mut Fields<'a>,
     ) -> ServerResult<()> {
-        T::collect_all_fields(*self, ctx, fields)
+        T::collect_all_fields(self.0, ctx, fields)
     }
 }
 
@@ -193,6 +210,19 @@ pub fn resolve_container_serial<'a, T: ContainerType + ?Sized>(
     root: &'a T,
 ) -> impl Future<Output = ServerResult<Value>> + Send {
     join_fields(Fields::collect(ctx, root), false)
+}
+
+/// Resolve an erased container, concurrently or serially. The derive macros
+/// call this with their generated [`ErasedContainer`] impl.
+#[doc(hidden)]
+pub fn resolve_container_dyn<'a>(
+    ctx: &'a ContextSelectionSet<'a>,
+    root: &dyn ErasedContainer<'a>,
+    parallel: bool,
+) -> impl Future<Output = ServerResult<Value>> + Send + 'a {
+    let mut fields = Fields::new(ctx);
+    let fields = fields.add_set_erased(ctx, root).map(|()| fields);
+    join_fields(fields, parallel)
 }
 
 pub(crate) fn create_value_object(values: Vec<(Name, Value)>) -> Value {
@@ -246,7 +276,8 @@ async fn join_fields(fields: ServerResult<Fields<'_>>, parallel: bool) -> Server
 
 /// Runs a field's resolver through the request's extensions and the field's
 /// custom directives.
-async fn resolve_field_with_hooks(
+#[doc(hidden)]
+pub async fn resolve_field_with_hooks(
     ctx_field: &Context<'_>,
     type_name: Cow<'static, str>,
     resolve_fut: ResolveFut<'_>,
@@ -346,14 +377,18 @@ pub struct Fields<'a> {
 }
 
 impl<'a> Fields<'a> {
+    fn new(ctx: &'a ContextSelectionSet<'a>) -> Self {
+        Fields {
+            futures: Vec::new(),
+            parent_path: ctx.path_node.as_ref(),
+        }
+    }
+
     fn collect<T: ContainerType + ?Sized>(
         ctx: &'a ContextSelectionSet<'a>,
         root: &'a T,
     ) -> ServerResult<Self> {
-        let mut fields = Fields {
-            futures: Vec::new(),
-            parent_path: ctx.path_node.as_ref(),
-        };
+        let mut fields = Fields::new(ctx);
         fields.add_set(ctx, root)?;
         Ok(fields)
     }
@@ -372,7 +407,7 @@ impl<'a> Fields<'a> {
         ctx: &ContextSelectionSet<'a>,
         root: &'a T,
     ) -> ServerResult<()> {
-        self.add_set_erased(ctx, &root)
+        self.add_set_erased(ctx, &GenericContainer(root))
     }
 
     fn add_set_erased(
