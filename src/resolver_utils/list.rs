@@ -3,6 +3,17 @@ use crate::{
     parser::types::Field,
 };
 
+type BoxValueFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = ServerResult<Value>> + Send + 'a>>;
+
+/// Non-generic join, so `try_join_all` is compiled once instead of once per item type.
+#[inline(never)]
+async fn join_list(futures: Vec<BoxValueFuture<'_>>) -> ServerResult<Value> {
+    Ok(Value::List(
+        futures_util::future::try_join_all(futures).await?,
+    ))
+}
+
 /// Resolve an list by executing each of the items concurrently.
 pub async fn resolve_list<'a, T: OutputType + 'a>(
     ctx: &ContextSelectionSet<'a>,
@@ -12,9 +23,9 @@ pub async fn resolve_list<'a, T: OutputType + 'a>(
 ) -> ServerResult<Value> {
     let extensions = &ctx.query_env.extensions;
     if !extensions.is_empty() {
-        let mut futures = len.map(Vec::with_capacity).unwrap_or_default();
+        let mut futures: Vec<BoxValueFuture<'_>> = len.map(Vec::with_capacity).unwrap_or_default();
         for (idx, item) in iter.into_iter().enumerate() {
-            futures.push({
+            futures.push(Box::pin({
                 let ctx = ctx.clone();
                 async move {
                     let ctx_idx = ctx.with_index(idx);
@@ -41,23 +52,19 @@ pub async fn resolve_list<'a, T: OutputType + 'a>(
                         .await
                         .map(|value| value.expect("You definitely encountered a bug!"))
                 }
-            });
+            }));
         }
-        Ok(Value::List(
-            futures_util::future::try_join_all(futures).await?,
-        ))
+        join_list(futures).await
     } else {
-        let mut futures = len.map(Vec::with_capacity).unwrap_or_default();
+        let mut futures: Vec<BoxValueFuture<'_>> = len.map(Vec::with_capacity).unwrap_or_default();
         for (idx, item) in iter.into_iter().enumerate() {
             let ctx_idx = ctx.with_index(idx);
-            futures.push(async move {
+            futures.push(Box::pin(async move {
                 OutputType::resolve(&item, &ctx_idx, field)
                     .await
                     .map_err(|err| ctx_idx.set_error_path(err))
-            });
+            }));
         }
-        Ok(Value::List(
-            futures_util::future::try_join_all(futures).await?,
-        ))
+        join_list(futures).await
     }
 }

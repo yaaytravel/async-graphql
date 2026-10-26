@@ -369,7 +369,7 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
                 if ctx.item.node.name.node == #field_name {
                     #guard
                     let obj: #ty = #block;
-                    return #crate_name::resolver_utils::resolve_simple_field_value(ctx, &obj).await;
+                    return #crate_name::resolver_utils::erase_field(#crate_name::resolver_utils::resolve_simple_field_value(ctx, &obj)).await;
                 }
             });
         } else {

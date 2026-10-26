@@ -125,11 +125,58 @@ impl<T: ContainerType, E: Into<Error> + Send + Sync + Clone> ContainerType for R
 }
 
 /// Resolve an container by executing each of the fields concurrently.
+/// Object-safe view of a borrowed [`ContainerType`], so field collection and
+/// container resolution are compiled once instead of once per GraphQL type.
+#[doc(hidden)]
+pub trait ErasedContainer<'a>: Send + Sync {
+    fn erased_resolve_field<'b>(
+        &'b self,
+        ctx: &'b Context<'b>,
+    ) -> Pin<Box<dyn Future<Output = ServerResult<Option<Value>>> + Send + 'b>>
+    where
+        'a: 'b;
+    fn erased_type_name(&self) -> std::borrow::Cow<'static, str>;
+    fn erased_introspection_type_name(&self) -> std::borrow::Cow<'static, str>;
+    fn erased_collect_all_fields(
+        &self,
+        ctx: &ContextSelectionSet<'a>,
+        fields: &mut Fields<'a>,
+    ) -> ServerResult<()>;
+}
+
+impl<'a, T: ContainerType + ?Sized> ErasedContainer<'a> for &'a T {
+    fn erased_resolve_field<'b>(
+        &'b self,
+        ctx: &'b Context<'b>,
+    ) -> Pin<Box<dyn Future<Output = ServerResult<Option<Value>>> + Send + 'b>>
+    where
+        'a: 'b,
+    {
+        Box::pin(T::resolve_field(*self, ctx))
+    }
+    fn erased_type_name(&self) -> std::borrow::Cow<'static, str> {
+        T::type_name()
+    }
+    fn erased_introspection_type_name(&self) -> std::borrow::Cow<'static, str> {
+        T::introspection_type_name(*self)
+    }
+    fn erased_collect_all_fields(
+        &self,
+        ctx: &ContextSelectionSet<'a>,
+        fields: &mut Fields<'a>,
+    ) -> ServerResult<()> {
+        T::collect_all_fields(*self, ctx, fields)
+    }
+}
+
+type ErasedRoot<'a> = Arc<dyn ErasedContainer<'a> + 'a>;
+
+/// Resolve an container by executing each of the fields concurrently.
 pub async fn resolve_container<'a, T: ContainerType + ?Sized>(
     ctx: &ContextSelectionSet<'a>,
     root: &'a T,
 ) -> ServerResult<Value> {
-    resolve_container_inner(ctx, root, true).await
+    resolve_container_inner(ctx, Arc::new(root), true).await
 }
 
 /// Resolve an container by executing each of the fields serially.
@@ -137,7 +184,7 @@ pub async fn resolve_container_serial<'a, T: ContainerType + ?Sized>(
     ctx: &ContextSelectionSet<'a>,
     root: &'a T,
 ) -> ServerResult<Value> {
-    resolve_container_inner(ctx, root, false).await
+    resolve_container_inner(ctx, Arc::new(root), false).await
 }
 
 pub(crate) fn create_value_object(values: Vec<(Name, Value)>) -> Value {
@@ -174,13 +221,13 @@ fn insert_value(target: &mut IndexMap<Name, Value>, name: Name, value: Value) {
     }
 }
 
-async fn resolve_container_inner<'a, T: ContainerType + ?Sized>(
+async fn resolve_container_inner<'a>(
     ctx: &ContextSelectionSet<'a>,
-    root: &'a T,
+    root: ErasedRoot<'a>,
     parallel: bool,
 ) -> ServerResult<Value> {
     let mut fields = Fields(Vec::new());
-    fields.add_set(ctx, root)?;
+    fields.add_set_erased(ctx, root)?;
 
     let res = if parallel {
         futures_util::future::try_join_all(fields.0).await?
@@ -208,6 +255,14 @@ impl<'a> Fields<'a> {
         ctx: &ContextSelectionSet<'a>,
         root: &'a T,
     ) -> ServerResult<()> {
+        self.add_set_erased(ctx, Arc::new(root))
+    }
+
+    fn add_set_erased(
+        &mut self,
+        ctx: &ContextSelectionSet<'a>,
+        root: ErasedRoot<'a>,
+    ) -> ServerResult<()> {
         for selection in &ctx.item.node.items {
             match &selection.node {
                 Selection::Field(field) => {
@@ -215,7 +270,7 @@ impl<'a> Fields<'a> {
                         // Get the typename
                         let ctx_field = ctx.with_field(field);
                         let field_name = ctx_field.item.node.response_key().node.clone();
-                        let typename = root.introspection_type_name().into_owned();
+                        let typename = root.erased_introspection_type_name().into_owned();
 
                         self.0.push(Box::pin(async move {
                             Ok((field_name, Value::String(typename)))
@@ -225,6 +280,7 @@ impl<'a> Fields<'a> {
 
                     let resolve_fut = Box::pin({
                         let ctx = ctx.clone();
+                        let root = root.clone();
                         async move {
                             let ctx_field = ctx.with_field(field);
                             let field_name = ctx_field.item.node.response_key().node.clone();
@@ -233,10 +289,12 @@ impl<'a> Fields<'a> {
                             if extensions.is_empty() && field.node.directives.is_empty() {
                                 Ok((
                                     field_name,
-                                    root.resolve_field(&ctx_field).await?.unwrap_or_default(),
+                                    root.erased_resolve_field(&ctx_field)
+                                        .await?
+                                        .unwrap_or_default(),
                                 ))
                             } else {
-                                let type_name = T::type_name();
+                                let type_name = root.erased_type_name();
                                 let resolve_info = ResolveInfo {
                                     path_node: ctx_field.path_node.as_ref().unwrap(),
                                     parent_type: &type_name,
@@ -271,7 +329,7 @@ impl<'a> Fields<'a> {
                                     field: &field.node,
                                 };
 
-                                let resolve_fut = root.resolve_field(&ctx_field);
+                                let resolve_fut = root.erased_resolve_field(&ctx_field);
 
                                 if field.node.directives.is_empty() {
                                     futures_util::pin_mut!(resolve_fut);
@@ -357,7 +415,7 @@ impl<'a> Fields<'a> {
                     let type_condition =
                         type_condition.map(|condition| condition.node.on.node.as_str());
 
-                    let introspection_type_name = root.introspection_type_name();
+                    let introspection_type_name = root.erased_introspection_type_name();
 
                     let applies_concrete_object = type_condition.is_some_and(|condition| {
                         introspection_type_name == condition
@@ -369,10 +427,15 @@ impl<'a> Fields<'a> {
                                 .is_some_and(|interfaces| interfaces.contains(condition))
                     });
                     if applies_concrete_object {
-                        root.collect_all_fields(&ctx.with_selection_set(selection_set), self)?;
-                    } else if type_condition.is_none_or(|condition| T::type_name() == condition) {
+                        root.erased_collect_all_fields(
+                            &ctx.with_selection_set(selection_set),
+                            self,
+                        )?;
+                    } else if type_condition
+                        .is_none_or(|condition| root.erased_type_name() == condition)
+                    {
                         // The fragment applies to an interface type.
-                        self.add_set(&ctx.with_selection_set(selection_set), root)?;
+                        self.add_set_erased(&ctx.with_selection_set(selection_set), root.clone())?;
                     }
                 }
             }
