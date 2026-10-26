@@ -22,12 +22,23 @@ where
         self.as_ref().resolve_now()
     }
 
+    #[cfg(feature = "boxed-trait")]
     async fn resolve(
         &self,
         ctx: &ContextSelectionSet<'_>,
         field: &Positioned<Field>,
     ) -> ServerResult<Value> {
         self.as_ref().resolve(ctx, field).await
+    }
+
+    // Returns the inner future rather than wrapping it in another state machine.
+    #[cfg(not(feature = "boxed-trait"))]
+    fn resolve(
+        &self,
+        ctx: &ContextSelectionSet<'_>,
+        field: &Positioned<Field>,
+    ) -> impl Future<Output = ServerResult<Value>> + Send {
+        self.as_ref().resolve(ctx, field)
     }
 }
 

@@ -72,18 +72,24 @@ impl<T: OutputType + Sync> OutputType for Option<T> {
         ctx: &ContextSelectionSet<'_>,
         field: &Positioned<Field>,
     ) -> ServerResult<Value> {
-        if let Some(inner) = self {
-            match OutputType::resolve(inner, ctx, field).await {
-                Ok(value) => Ok(value),
-                Err(err) => {
-                    ctx.add_error(err);
-                    Ok(Value::Null)
-                }
-            }
-        } else {
-            Ok(Value::Null)
+        match self {
+            Some(inner) => Ok(null_on_error(
+                ctx,
+                OutputType::resolve(inner, ctx, field).await,
+            )),
+            None => Ok(Value::Null),
         }
     }
+}
+
+/// A nullable field's value: an error is recorded on the request and becomes
+/// `null`. Not generic, so it is compiled once rather than once per type.
+#[inline(never)]
+fn null_on_error(ctx: &ContextSelectionSet<'_>, result: ServerResult<Value>) -> Value {
+    result.unwrap_or_else(|err| {
+        ctx.add_error(err);
+        Value::Null
+    })
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, future::Future};
 
 use futures_util::TryFutureExt;
 
@@ -34,21 +34,25 @@ async fn join_list(
 /// Items that resolve without the selection set or async work (scalars and
 /// enums) are stored directly, without a future, unless extensions need to see
 /// each item resolve.
-pub async fn resolve_list<'a, T: OutputType + 'a>(
-    ctx: &ContextSelectionSet<'a>,
-    field: &Positioned<Field>,
+///
+/// A plain function rather than an `async fn`: it starts every item before
+/// returning, and the future it returns is the same type for every `T`, so no
+/// state machine is generated per item type.
+pub fn resolve_list<'b, T: OutputType + 'b>(
+    ctx: &'b ContextSelectionSet<'_>,
+    field: &'b Positioned<Field>,
     iter: impl IntoIterator<Item = T>,
     len: Option<usize>,
-) -> ServerResult<Value> {
+) -> impl Future<Output = ServerResult<Value>> + Send + 'b {
     let hooks = !ctx.query_env.extensions.is_empty();
     let mut values: Vec<Value> = len.map(Vec::with_capacity).unwrap_or_default();
     let mut pending: Vec<(usize, BoxValueFuture<'_>)> = Vec::new();
     for (idx, item) in iter.into_iter().enumerate() {
-        if !hooks {
-            if let Some(value) = item.resolve_now() {
-                values.push(value);
-                continue;
-            }
+        if !hooks
+            && let Some(value) = item.resolve_now()
+        {
+            values.push(value);
+            continue;
         }
         values.push(Value::Null);
         if pending.capacity() == 0 {
@@ -83,7 +87,7 @@ pub async fn resolve_list<'a, T: OutputType + 'a>(
             }),
         ));
     }
-    join_list(values, pending).await
+    join_list(values, pending)
 }
 
 /// Runs a list item's resolver through the request's extensions. Not generic,

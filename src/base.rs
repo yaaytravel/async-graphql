@@ -125,13 +125,24 @@ impl<T: OutputType + ?Sized> OutputType for &T {
         T::resolve_now(*self)
     }
 
-    #[allow(clippy::trivially_copy_pass_by_ref)]
+    #[cfg(feature = "boxed-trait")]
     async fn resolve(
         &self,
         ctx: &ContextSelectionSet<'_>,
         field: &Positioned<Field>,
     ) -> ServerResult<Value> {
         T::resolve(*self, ctx, field).await
+    }
+
+    // Returns the inner future rather than wrapping it in another state machine.
+    #[cfg(not(feature = "boxed-trait"))]
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    fn resolve(
+        &self,
+        ctx: &ContextSelectionSet<'_>,
+        field: &Positioned<Field>,
+    ) -> impl Future<Output = ServerResult<Value>> + Send {
+        T::resolve(*self, ctx, field)
     }
 }
 
@@ -257,13 +268,24 @@ impl<T: OutputType + ?Sized> OutputType for Arc<T> {
         T::resolve_now(&**self)
     }
 
-    #[allow(clippy::trivially_copy_pass_by_ref)]
+    #[cfg(feature = "boxed-trait")]
     async fn resolve(
         &self,
         ctx: &ContextSelectionSet<'_>,
         field: &Positioned<Field>,
     ) -> ServerResult<Value> {
         T::resolve(&**self, ctx, field).await
+    }
+
+    // Returns the inner future rather than wrapping it in another state machine.
+    #[cfg(not(feature = "boxed-trait"))]
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    fn resolve(
+        &self,
+        ctx: &ContextSelectionSet<'_>,
+        field: &Positioned<Field>,
+    ) -> impl Future<Output = ServerResult<Value>> + Send {
+        T::resolve(&**self, ctx, field)
     }
 }
 
