@@ -339,12 +339,12 @@ pub fn generate(
 
                 schema_args.push(quote! {
                     {
-                        let mut arg = #crate_name::registry::MetaInputValue::new(
-                            ::std::string::ToString::to_string(#name),
+                        let arg = #crate_name::registry::add_input_value(
+                            &mut field.args,
+                            #name,
                             <#ty as #crate_name::InputType>::create_type_info(registry),
                         );
                         #(#arg_sets)*
-                        field.args.insert(::std::string::ToString::to_string(#name), arg);
                     }
                 });
 

@@ -304,12 +304,12 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
             }
 
             schema_fields.push(quote! {
-                let mut field = #crate_name::registry::MetaField::new(
-                    ::std::string::ToString::to_string(#field_name),
+                let field = #crate_name::registry::add_field(
+                    &mut fields,
+                    #field_name,
                     <#ty as #crate_name::OutputType>::create_type_info(registry),
                 );
                 #(#field_sets)*
-                fields.insert(::std::string::ToString::to_string(#field_name), field);
             });
         } else {
             schema_fields.push(quote! {
