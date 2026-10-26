@@ -125,6 +125,10 @@ pub fn generate(
                 })
             }
 
+            fn resolve_now(&self) -> ::std::option::Option<#crate_name::Value> {
+                ::std::option::Option::Some(#crate_name::ScalarType::to_value(self))
+            }
+
             async fn resolve(
                 &self,
                 _: &#crate_name::ContextSelectionSet<'_>,

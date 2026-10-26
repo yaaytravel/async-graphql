@@ -286,6 +286,10 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
                 Self::__create_type_info(registry)
             }
 
+            fn resolve_now(&self) -> ::std::option::Option<#crate_name::Value> {
+                ::std::option::Option::Some(#crate_name::resolver_utils::enum_value(*self))
+            }
+
             async fn resolve(&self, _: &#crate_name::ContextSelectionSet<'_>, _field: &#crate_name::Positioned<#crate_name::parser::types::Field>) -> #crate_name::ServerResult<#crate_name::Value> {
                 ::std::result::Result::Ok(#crate_name::resolver_utils::enum_value(*self))
             }

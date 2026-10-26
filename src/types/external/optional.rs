@@ -60,6 +60,13 @@ impl<T: OutputType + Sync> OutputType for Option<T> {
         T::type_name().to_string()
     }
 
+    fn resolve_now(&self) -> Option<Value> {
+        match self {
+            Some(inner) => inner.resolve_now(),
+            None => Some(Value::Null),
+        }
+    }
+
     async fn resolve(
         &self,
         ctx: &ContextSelectionSet<'_>,

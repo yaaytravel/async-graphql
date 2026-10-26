@@ -71,6 +71,10 @@ impl OutputType for str {
         <String as OutputType>::create_type_info(registry)
     }
 
+    fn resolve_now(&self) -> Option<Value> {
+        Some(Value::String(self.to_string()))
+    }
+
     async fn resolve(
         &self,
         _: &ContextSelectionSet<'_>,

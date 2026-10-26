@@ -225,6 +225,10 @@ macro_rules! scalar_internal_output {
                 })
             }
 
+            fn resolve_now(&self) -> ::std::option::Option<$crate::Value> {
+                ::std::option::Option::Some($crate::ScalarType::to_value(self))
+            }
+
             async fn resolve(
                 &self,
                 _: &$crate::ContextSelectionSet<'_>,
@@ -264,6 +268,10 @@ macro_rules! scalar_internal_output {
                         requires_scopes: ::std::vec::Vec::new(),
                     }
                 })
+            }
+
+            fn resolve_now(&self) -> ::std::option::Option<$crate::Value> {
+                ::std::option::Option::Some($crate::ScalarType::to_value(self))
             }
 
             async fn resolve(

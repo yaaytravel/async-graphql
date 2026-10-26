@@ -86,6 +86,14 @@ pub trait OutputType: Send + Sync {
     /// Create type information in the registry and return qualified typename.
     fn create_type_info(registry: &mut registry::Registry) -> String;
 
+    /// Returns the value directly when resolving it needs neither the selection
+    /// set nor any async work, as for scalars and enums. Lists use this to skip
+    /// creating a future for each item.
+    #[doc(hidden)]
+    fn resolve_now(&self) -> Option<Value> {
+        None
+    }
+
     /// Resolve an output value to `async_graphql::Value`.
     #[cfg(feature = "boxed-trait")]
     async fn resolve(
@@ -113,6 +121,10 @@ impl<T: OutputType + ?Sized> OutputType for &T {
         T::create_type_info(registry)
     }
 
+    fn resolve_now(&self) -> Option<Value> {
+        T::resolve_now(*self)
+    }
+
     #[allow(clippy::trivially_copy_pass_by_ref)]
     async fn resolve(
         &self,
@@ -131,6 +143,11 @@ impl<T: OutputType + Sync, E: Into<Error> + Send + Sync + Clone> OutputType for 
 
     fn create_type_info(registry: &mut Registry) -> String {
         T::create_type_info(registry)
+    }
+
+    fn resolve_now(&self) -> Option<Value> {
+        // An error goes through `resolve`, which sets its path and position.
+        self.as_ref().ok().and_then(T::resolve_now)
     }
 
     async fn resolve(
@@ -174,6 +191,10 @@ impl<T: OutputType + ?Sized> OutputType for Box<T> {
 
     fn create_type_info(registry: &mut Registry) -> String {
         T::create_type_info(registry)
+    }
+
+    fn resolve_now(&self) -> Option<Value> {
+        T::resolve_now(self.as_ref())
     }
 
     #[cfg(feature = "boxed-trait")]
@@ -230,6 +251,10 @@ impl<T: OutputType + ?Sized> OutputType for Arc<T> {
 
     fn create_type_info(registry: &mut Registry) -> String {
         T::create_type_info(registry)
+    }
+
+    fn resolve_now(&self) -> Option<Value> {
+        T::resolve_now(&**self)
     }
 
     #[allow(clippy::trivially_copy_pass_by_ref)]

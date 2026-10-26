@@ -18,6 +18,10 @@ where
         <T as OutputType>::create_type_info(registry)
     }
 
+    fn resolve_now(&self) -> Option<Value> {
+        self.as_ref().resolve_now()
+    }
+
     async fn resolve(
         &self,
         ctx: &ContextSelectionSet<'_>,
