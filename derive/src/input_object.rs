@@ -75,6 +75,20 @@ pub fn generate(object_args: &args::InputObject) -> GeneratorResult<TokenStream>
     let mut flatten_fields = Vec::new();
     let mut federation_fields = Vec::new();
 
+    // Without flattened fields, which read the whole object, each field's
+    // value is moved out of the object rather than cloned.
+    let take_values = !s
+        .fields
+        .iter()
+        .any(|field| field.flatten && !(field.skip || field.skip_input));
+    let take_field = |name: &str| {
+        if take_values {
+            quote!(obj.swap_remove(#name))
+        } else {
+            quote!(obj.get(#name).cloned())
+        }
+    };
+
     for field in &s.fields {
         let ident = field.ident.as_ref().unwrap();
         let ty = &field.ty;
@@ -169,14 +183,15 @@ pub fn generate(object_args: &args::InputObject) -> GeneratorResult<TokenStream>
         });
         let secret = field.secret;
 
+        let take = take_field(&name);
         if let Some(default) = default {
             get_fields.push(quote! {
                 #[allow(non_snake_case)]
                 let #ident: #ty = {
-                    match obj.get(#name) {
+                    match #take {
                         ::std::option::Option::Some(value) => {
                             #[allow(unused_mut)]
-                            let mut #ident = #crate_name::InputType::parse(::std::option::Option::Some(::std::clone::Clone::clone(&value)))
+                            let mut #ident = #crate_name::InputType::parse(::std::option::Option::Some(value))
                                 .map_err(#crate_name::InputValueError::propagate)?;
                             #process_with
                             #ident
@@ -190,7 +205,7 @@ pub fn generate(object_args: &args::InputObject) -> GeneratorResult<TokenStream>
         } else {
             get_fields.push(quote! {
                 #[allow(non_snake_case, unused_mut)]
-                let mut #ident: #ty = #crate_name::InputType::parse(obj.get(#name).cloned())
+                let mut #ident: #ty = #crate_name::InputType::parse(#take)
                     .map_err(#crate_name::InputValueError::propagate)?;
                 #process_with
                 #validators
@@ -331,6 +346,8 @@ pub fn generate(object_args: &args::InputObject) -> GeneratorResult<TokenStream>
 
                 fn parse(value: ::std::option::Option<#crate_name::Value>) -> #crate_name::InputValueResult<Self> {
                     if let ::std::option::Option::Some(#crate_name::Value::Object(obj)) = value {
+                        #[allow(unused_mut)]
+                        let mut obj = obj;
                         #(#get_fields)*
                         let obj = Self { #(#fields),* };
                         #obj_validator
@@ -380,6 +397,8 @@ pub fn generate(object_args: &args::InputObject) -> GeneratorResult<TokenStream>
 
                 fn __internal_parse(value: ::std::option::Option<#crate_name::Value>) -> #crate_name::InputValueResult<Self> where Self: #crate_name::InputType {
                     if let ::std::option::Option::Some(#crate_name::Value::Object(obj)) = value {
+                        #[allow(unused_mut)]
+                        let mut obj = obj;
                         #(#get_fields)*
                         let obj = Self { #(#fields),* };
                         #obj_validator
