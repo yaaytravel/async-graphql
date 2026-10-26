@@ -5,8 +5,8 @@ use syn::ItemImpl;
 use crate::{
     args::{self, RenameTarget},
     utils::{
-        GeneratorResult, gen_boxed_trait, get_crate_path, get_rustdoc, get_type_path_and_name,
-        visible_fn,
+        GeneratorResult, gen_boxed_trait, gen_ready_resolve, get_crate_path, get_rustdoc,
+        get_type_path_and_name, visible_fn,
     },
 };
 
@@ -66,6 +66,8 @@ pub fn generate(
         None => quote! { ::std::option::Option::None },
     };
 
+    let ready_resolve =
+        gen_ready_resolve(&crate_name, quote!(#crate_name::ScalarType::to_value(self)));
     let expanded = quote! {
         #item_impl
 
@@ -129,13 +131,7 @@ pub fn generate(
                 ::std::option::Option::Some(#crate_name::ScalarType::to_value(self))
             }
 
-            async fn resolve(
-                &self,
-                _: &#crate_name::ContextSelectionSet<'_>,
-                _field: &#crate_name::Positioned<#crate_name::parser::types::Field>
-            ) -> #crate_name::ServerResult<#crate_name::Value> {
-                ::std::result::Result::Ok(#crate_name::ScalarType::to_value(self))
-            }
+            #ready_resolve
         }
     };
     Ok(expanded.into())

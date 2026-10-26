@@ -6,8 +6,8 @@ use syn::{Error, ext::IdentExt};
 use crate::{
     args::{self, RenameRuleExt, RenameTarget, TypeDirectiveLocation},
     utils::{
-        GeneratorResult, gen_boxed_trait, gen_directive_calls, get_crate_path, get_rustdoc,
-        visible_fn,
+        GeneratorResult, gen_boxed_trait, gen_directive_calls, gen_ready_resolve, get_crate_path,
+        get_rustdoc, visible_fn,
     },
 };
 
@@ -220,6 +220,10 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
     if has_requires_scopes {
         enum_builder_calls.push(quote!(.requires_scopes(::std::vec![ #(#requires_scopes),* ])));
     }
+    let resolve = gen_ready_resolve(
+        &crate_name,
+        quote!(#crate_name::resolver_utils::enum_name_value(self.__gql_name())),
+    );
     let expanded = quote! {
         #[allow(clippy::all, clippy::pedantic)]
         impl #crate_name::resolver_utils::EnumType for #ident {
@@ -314,9 +318,7 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
                 ::std::option::Option::Some(#crate_name::resolver_utils::enum_name_value(self.__gql_name()))
             }
 
-            async fn resolve(&self, _: &#crate_name::ContextSelectionSet<'_>, _field: &#crate_name::Positioned<#crate_name::parser::types::Field>) -> #crate_name::ServerResult<#crate_name::Value> {
-                ::std::result::Result::Ok(#crate_name::resolver_utils::enum_name_value(self.__gql_name()))
-            }
+            #resolve
         }
 
         impl ::std::convert::From<#ident> for #crate_name::Value {
