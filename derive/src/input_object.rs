@@ -269,17 +269,15 @@ pub fn generate(object_args: &args::InputObject) -> GeneratorResult<TokenStream>
     let get_federation_fields = {
         let fields = federation_fields.into_iter().map(|(ty, name)| {
             quote! {
-                if let ::std::option::Option::Some(fields) = <#ty as #crate_name::InputType>::federation_fields() {
-                    res.push(::std::format!("{} {}", #name, fields));
-                } else {
-                    res.push(::std::string::ToString::to_string(#name));
-                }
+                (
+                    #name,
+                    <#ty as #crate_name::InputType>::federation_fields
+                        as fn() -> ::std::option::Option<::std::string::String>,
+                )
             }
         });
         quote! {
-            let mut res = ::std::vec::Vec::new();
-            #(#fields)*
-            ::std::option::Option::Some(::std::format!("{{ {} }}", res.join(" ")))
+            #crate_name::registry::input_federation_fields(&[ #(#fields),* ])
         }
     };
 
