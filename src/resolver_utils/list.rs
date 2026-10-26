@@ -48,9 +48,7 @@ pub fn resolve_list<'b, T: OutputType + 'b>(
     let mut values: Vec<Value> = len.map(Vec::with_capacity).unwrap_or_default();
     let mut pending: Vec<(usize, BoxValueFuture<'_>)> = Vec::new();
     for (idx, item) in iter.into_iter().enumerate() {
-        if !hooks
-            && let Some(value) = item.resolve_now()
-        {
+        if !hooks && let Some(value) = item.resolve_now() {
             values.push(value);
             continue;
         }
