@@ -747,7 +747,7 @@ pub fn generate(
     };
 
     find_entities.sort_by(|(a, _), (b, _)| b.cmp(a));
-    let find_entities_iter = find_entities.iter().map(|(_, code)| code);
+    let find_entities_iter: Vec<_> = find_entities.iter().map(|(_, code)| code).collect();
 
     if resolvers.is_empty() && create_entity_types.is_empty() {
         return Err(Error::new_spanned(
@@ -768,6 +768,34 @@ pub fn generate(
             quote!(::std::option::Option::Some(
                 ::std::vec![ ::std::string::ToString::to_string(#unresolvable_key)]
             ))
+        }
+    };
+
+    // Without entity resolvers, `find_entity` only validates the
+    // representation, which needs no state machine.
+    let find_entity = if find_entities.is_empty() && !cfg!(feature = "boxed-trait") {
+        quote! {
+            fn find_entity(
+                &self,
+                ctx: &#crate_name::Context<'_>,
+                params: &#crate_name::Value,
+            ) -> impl ::std::future::Future<Output = #crate_name::ServerResult<::std::option::Option<#crate_name::Value>>> + ::std::marker::Send {
+                ::std::future::ready(
+                    #crate_name::resolver_utils::find_entity_params(ctx, params)
+                        .map(|_| ::std::option::Option::None),
+                )
+            }
+        }
+    } else {
+        quote! {
+            async fn find_entity(&self, ctx: &#crate_name::Context<'_>, params: &#crate_name::Value) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
+                if let ::std::option::Option::Some((params, typename)) =
+                    #crate_name::resolver_utils::find_entity_params(ctx, params)?
+                {
+                    #(#find_entities_iter)*
+                }
+                ::std::result::Result::Ok(::std::option::Option::None)
+            }
         }
     };
 
@@ -864,14 +892,7 @@ pub fn generate(
                         ::std::result::Result::Ok(::std::option::Option::None)
                     }
 
-                    async fn find_entity(&self, ctx: &#crate_name::Context<'_>, params: &#crate_name::Value) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
-                        if let ::std::option::Option::Some((params, typename)) =
-                            #crate_name::resolver_utils::find_entity_params(ctx, params)?
-                        {
-                            #(#find_entities_iter)*
-                        }
-                        ::std::result::Result::Ok(::std::option::Option::None)
-                    }
+                    #find_entity
                 }
 
                 #[allow(clippy::all, clippy::pedantic)]
