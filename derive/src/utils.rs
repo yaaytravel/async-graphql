@@ -380,36 +380,14 @@ fn extract_directive_call_path(directive: &Expr) -> Option<syn::Path> {
 /// selection set or any async work: it returns a ready future instead of being
 /// an `async fn`, so it has no state machine of its own.
 pub fn gen_ready_resolve(crate_name: &syn::Path, value: TokenStream) -> TokenStream {
-    if cfg!(feature = "boxed-trait") {
-        quote! {
-            async fn resolve(
-                &self,
-                _: &#crate_name::ContextSelectionSet<'_>,
-                _field: &#crate_name::Positioned<#crate_name::parser::types::Field>,
-            ) -> #crate_name::ServerResult<#crate_name::Value> {
-                ::std::result::Result::Ok(#value)
-            }
+    quote! {
+        fn resolve(
+            &self,
+            _: &#crate_name::ContextSelectionSet<'_>,
+            _field: &#crate_name::Positioned<#crate_name::parser::types::Field>,
+        ) -> impl ::std::future::Future<Output = #crate_name::ServerResult<#crate_name::Value>> + ::std::marker::Send {
+            ::std::future::ready(::std::result::Result::Ok(#value))
         }
-    } else {
-        quote! {
-            fn resolve(
-                &self,
-                _: &#crate_name::ContextSelectionSet<'_>,
-                _field: &#crate_name::Positioned<#crate_name::parser::types::Field>,
-            ) -> impl ::std::future::Future<Output = #crate_name::ServerResult<#crate_name::Value>> + ::std::marker::Send {
-                ::std::future::ready(::std::result::Result::Ok(#value))
-            }
-        }
-    }
-}
-
-pub fn gen_boxed_trait(crate_name: &syn::Path) -> TokenStream {
-    if cfg!(feature = "boxed-trait") {
-        quote! {
-            #[#crate_name::async_trait::async_trait]
-        }
-    } else {
-        quote! {}
     }
 }
 

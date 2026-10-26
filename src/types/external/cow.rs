@@ -4,7 +4,6 @@ use async_graphql_parser::types::Field;
 
 use crate::{ContextSelectionSet, OutputType, Positioned, ServerResult, Value, registry};
 
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 impl<T> OutputType for Cow<'_, T>
 where
     T: OutputType + ToOwned + ?Sized,
@@ -22,17 +21,7 @@ where
         self.as_ref().resolve_now()
     }
 
-    #[cfg(feature = "boxed-trait")]
-    async fn resolve(
-        &self,
-        ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
-    ) -> ServerResult<Value> {
-        self.as_ref().resolve(ctx, field).await
-    }
-
     // Returns the inner future rather than wrapping it in another state machine.
-    #[cfg(not(feature = "boxed-trait"))]
     fn resolve(
         &self,
         ctx: &ContextSelectionSet<'_>,

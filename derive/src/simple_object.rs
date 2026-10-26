@@ -10,9 +10,9 @@ use crate::{
         self, RenameRuleExt, RenameTarget, Resolvability, SimpleObjectField, TypeDirectiveLocation,
     },
     utils::{
-        GeneratorResult, gen_boxed_trait, gen_deprecation, gen_directive_calls,
-        gen_erased_container, gen_resolve_field_value, generate_guards, get_crate_path,
-        get_rustdoc, parse_complexity_expr, visible_fn,
+        GeneratorResult, gen_deprecation, gen_directive_calls, gen_erased_container,
+        gen_resolve_field_value, generate_guards, get_crate_path, get_rustdoc,
+        parse_complexity_expr, visible_fn,
     },
 };
 
@@ -31,7 +31,6 @@ struct SimpleObjectFieldGenerator<'a> {
 
 pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream> {
     let crate_name = get_crate_path(&object_args.crate_path, object_args.internal);
-    let boxed_trait = gen_boxed_trait(&crate_name);
     let ident = &object_args.ident;
     let (impl_generics, ty_generics, where_clause) = object_args.generics.split_for_impl();
     let extends = object_args.extends;
@@ -628,7 +627,6 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
             }
 
             #[allow(clippy::all, clippy::pedantic)]
-            #boxed_trait
             impl #impl_generics #crate_name::resolver_utils::ContainerType for #ident #ty_generics #where_clause {
                 #collect_erased
                 #resolve_field_now
@@ -637,7 +635,6 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
             }
 
             #[allow(clippy::all, clippy::pedantic)]
-            #boxed_trait
             impl #impl_generics #crate_name::OutputType for #ident #ty_generics #where_clause {
                 fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
                     #gql_typename
@@ -741,7 +738,6 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
 
             let expanded = quote! {
                 #[allow(clippy::all, clippy::pedantic)]
-                #boxed_trait
                 impl #def_bounds #crate_name::resolver_utils::ContainerType for #concrete_type {
                     async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
                         #complex_resolver
@@ -750,7 +746,6 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
                 }
 
                 #[allow(clippy::all, clippy::pedantic)]
-                #boxed_trait
                 impl #def_bounds #crate_name::OutputType for #concrete_type {
                     fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
                         ::std::borrow::Cow::Borrowed(#gql_typename)

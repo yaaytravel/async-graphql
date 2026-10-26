@@ -5,15 +5,11 @@ use syn::Error;
 
 use crate::{
     args::{self, NewTypeName, RenameTarget},
-    utils::{
-        GeneratorResult, gen_boxed_trait, gen_ready_resolve, get_crate_path, get_rustdoc,
-        visible_fn,
-    },
+    utils::{GeneratorResult, gen_ready_resolve, get_crate_path, get_rustdoc, visible_fn},
 };
 
 pub fn generate(newtype_args: &args::NewType) -> GeneratorResult<TokenStream> {
     let crate_name = get_crate_path(&newtype_args.crate_path, newtype_args.internal);
-    let boxed_trait = gen_boxed_trait(&crate_name);
     let ident = &newtype_args.ident;
     let (impl_generics, ty_generics, where_clause) = newtype_args.generics.split_for_impl();
     let inaccessible = newtype_args.inaccessible;
@@ -125,7 +121,6 @@ pub fn generate(newtype_args: &args::NewType) -> GeneratorResult<TokenStream> {
         }
 
         #[allow(clippy::all, clippy::pedantic)]
-        #boxed_trait
         impl #impl_generics #crate_name::OutputType for #ident #ty_generics #where_clause {
             fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
                 #type_name

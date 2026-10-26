@@ -79,7 +79,6 @@ where
     }
 }
 
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 impl<K, V, S> OutputType for HashMap<K, V, S>
 where
     K: ToString + Eq + Hash + Send + Sync,

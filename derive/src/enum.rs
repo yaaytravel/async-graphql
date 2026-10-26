@@ -6,14 +6,13 @@ use syn::{Error, ext::IdentExt};
 use crate::{
     args::{self, RenameRuleExt, RenameTarget, TypeDirectiveLocation},
     utils::{
-        GeneratorResult, gen_boxed_trait, gen_directive_calls, gen_ready_resolve, get_crate_path,
-        get_rustdoc, visible_fn,
+        GeneratorResult, gen_directive_calls, gen_ready_resolve, get_crate_path, get_rustdoc,
+        visible_fn,
     },
 };
 
 pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
     let crate_name = get_crate_path(&enum_args.crate_path, enum_args.internal);
-    let boxed_trait = gen_boxed_trait(&crate_name);
     let ident = &enum_args.ident;
     let e = match &enum_args.data {
         Data::Enum(e) => e,
@@ -304,7 +303,6 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
             }
         }
 
-        #boxed_trait
         impl #crate_name::OutputType for #ident {
             fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
                 Self::__type_name()

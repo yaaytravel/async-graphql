@@ -5,7 +5,6 @@ use crate::{
     ServerResult, Value, parser::types::Field, registry, resolver_utils::resolve_list,
 };
 
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 impl<'a, T: OutputType + 'a> OutputType for &'a [T] {
     fn type_name() -> Cow<'static, str> {
         Cow::Owned(format!("[{}]", T::qualified_type_name()))
@@ -31,7 +30,6 @@ impl<'a, T: OutputType + 'a> OutputType for &'a [T] {
 
 macro_rules! impl_output_slice_for_smart_ptr {
     ($ty:ty) => {
-        #[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
         impl<T: OutputType> OutputType for $ty {
             fn type_name() -> Cow<'static, str> {
                 Cow::Owned(format!("[{}]", T::qualified_type_name()))

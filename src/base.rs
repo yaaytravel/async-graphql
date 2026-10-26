@@ -1,4 +1,3 @@
-#[cfg(not(feature = "boxed-trait"))]
 use std::future::Future;
 use std::{
     borrow::Cow,
@@ -65,7 +64,6 @@ pub trait InputType: Send + Sync + Sized {
 }
 
 /// Represents a GraphQL output type.
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 pub trait OutputType: Send + Sync {
     /// Type the name.
     fn type_name() -> Cow<'static, str>;
@@ -95,15 +93,6 @@ pub trait OutputType: Send + Sync {
     }
 
     /// Resolve an output value to `async_graphql::Value`.
-    #[cfg(feature = "boxed-trait")]
-    async fn resolve(
-        &self,
-        ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
-    ) -> ServerResult<Value>;
-
-    /// Resolve an output value to `async_graphql::Value`.
-    #[cfg(not(feature = "boxed-trait"))]
     fn resolve(
         &self,
         ctx: &ContextSelectionSet<'_>,
@@ -111,7 +100,6 @@ pub trait OutputType: Send + Sync {
     ) -> impl Future<Output = ServerResult<Value>> + Send;
 }
 
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 impl<T: OutputType + ?Sized> OutputType for &T {
     fn type_name() -> Cow<'static, str> {
         T::type_name()
@@ -125,17 +113,7 @@ impl<T: OutputType + ?Sized> OutputType for &T {
         T::resolve_now(*self)
     }
 
-    #[cfg(feature = "boxed-trait")]
-    async fn resolve(
-        &self,
-        ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
-    ) -> ServerResult<Value> {
-        T::resolve(*self, ctx, field).await
-    }
-
     // Returns the inner future rather than wrapping it in another state machine.
-    #[cfg(not(feature = "boxed-trait"))]
     #[allow(clippy::trivially_copy_pass_by_ref)]
     fn resolve(
         &self,
@@ -146,7 +124,6 @@ impl<T: OutputType + ?Sized> OutputType for &T {
     }
 }
 
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 impl<T: OutputType + Sync, E: Into<Error> + Send + Sync + Clone> OutputType for Result<T, E> {
     fn type_name() -> Cow<'static, str> {
         T::type_name()
@@ -194,7 +171,6 @@ pub trait InputObjectType: InputType {}
 /// A GraphQL oneof input object.
 pub trait OneofObjectType: InputObjectType {}
 
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 impl<T: OutputType + ?Sized> OutputType for Box<T> {
     fn type_name() -> Cow<'static, str> {
         T::type_name()
@@ -208,17 +184,7 @@ impl<T: OutputType + ?Sized> OutputType for Box<T> {
         T::resolve_now(self.as_ref())
     }
 
-    #[cfg(feature = "boxed-trait")]
-    async fn resolve(
-        &self,
-        ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
-    ) -> ServerResult<Value> {
-        T::resolve(self.as_ref(), ctx, field).await
-    }
-
     #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[cfg(not(feature = "boxed-trait"))]
     fn resolve(
         &self,
         ctx: &ContextSelectionSet<'_>,
@@ -254,7 +220,6 @@ impl<T: InputType> InputType for Box<T> {
     }
 }
 
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 impl<T: OutputType + ?Sized> OutputType for Arc<T> {
     fn type_name() -> Cow<'static, str> {
         T::type_name()
@@ -268,17 +233,7 @@ impl<T: OutputType + ?Sized> OutputType for Arc<T> {
         T::resolve_now(&**self)
     }
 
-    #[cfg(feature = "boxed-trait")]
-    async fn resolve(
-        &self,
-        ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
-    ) -> ServerResult<Value> {
-        T::resolve(&**self, ctx, field).await
-    }
-
     // Returns the inner future rather than wrapping it in another state machine.
-    #[cfg(not(feature = "boxed-trait"))]
     #[allow(clippy::trivially_copy_pass_by_ref)]
     fn resolve(
         &self,
@@ -315,7 +270,6 @@ impl<T: InputType> InputType for Arc<T> {
     }
 }
 
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 impl<T: OutputType + ?Sized> OutputType for Weak<T> {
     fn type_name() -> Cow<'static, str> {
         <Option<Arc<T>> as OutputType>::type_name()
@@ -335,14 +289,9 @@ impl<T: OutputType + ?Sized> OutputType for Weak<T> {
 }
 
 #[doc(hidden)]
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 pub trait ComplexObject {
     fn fields(registry: &mut registry::Registry) -> Vec<(String, registry::MetaField)>;
 
-    #[cfg(feature = "boxed-trait")]
-    async fn resolve_field(&self, ctx: &Context<'_>) -> ServerResult<Option<Value>>;
-
-    #[cfg(not(feature = "boxed-trait"))]
     fn resolve_field(
         &self,
         ctx: &Context<'_>,
