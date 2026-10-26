@@ -437,38 +437,54 @@ pub fn gen_erased_container(
                 ctx: #crate_name::Context<'__erased>,
                 hooks: bool,
             ) -> #crate_name::resolver_utils::BoxFieldResult<'__erased> {
-                let root = *self;
-                if hooks {
-                    // Polls the resolver through a future type local to this impl:
-                    // `Pin<&mut F>`'s own `Future` impl is one generic shared by every
-                    // type, and would nest once per type like any other.
-                    struct HookedField<'f, F>(::std::pin::Pin<&'f mut F>);
+                // Both helpers are generic so that rustc takes `Send` from the
+                // `ContainerType::resolve_field` signature instead of inferring it
+                // from each type's resolver state machine, which is slow to check.
+                // Being declared here, they are still distinct for every type.
 
-                    impl<F: ::std::future::Future> ::std::future::Future for HookedField<'_, F> {
-                        type Output = F::Output;
+                // Polls the resolver through a future type local to this impl:
+                // `Pin<&mut F>`'s own `Future` impl is one generic shared by every
+                // type, and would nest once per type like any other.
+                struct HookedField<'f, F>(::std::pin::Pin<&'f mut F>);
 
-                        fn poll(
-                            mut self: ::std::pin::Pin<&mut Self>,
-                            cx: &mut ::std::task::Context<'_>,
-                        ) -> ::std::task::Poll<Self::Output> {
-                            self.0.as_mut().poll(cx)
-                        }
+                impl<F: ::std::future::Future> ::std::future::Future for HookedField<'_, F> {
+                    type Output = F::Output;
+
+                    fn poll(
+                        mut self: ::std::pin::Pin<&mut Self>,
+                        cx: &mut ::std::task::Context<'_>,
+                    ) -> ::std::task::Poll<Self::Output> {
+                        self.0.as_mut().poll(cx)
                     }
+                }
 
+                fn resolve<'a, C: #crate_name::resolver_utils::ContainerType + ?::std::marker::Sized>(
+                    root: &'a C,
+                    ctx: #crate_name::Context<'a>,
+                ) -> #crate_name::resolver_utils::BoxFieldResult<'a> {
+                    ::std::boxed::Box::pin(async move { root.resolve_field(&ctx).await })
+                }
+
+                fn resolve_with_hooks<'a, C: #crate_name::resolver_utils::ContainerType + ?::std::marker::Sized>(
+                    root: &'a C,
+                    ctx: #crate_name::Context<'a>,
+                ) -> #crate_name::resolver_utils::BoxFieldResult<'a> {
                     ::std::boxed::Box::pin(async move {
-                        let resolve_fut = #crate_name::resolver_utils::ContainerType::resolve_field(root, &ctx);
+                        let resolve_fut = root.resolve_field(&ctx);
                         let mut resolve_fut = HookedField(::std::pin::pin!(resolve_fut));
                         #crate_name::resolver_utils::resolve_field_with_hooks(
                             &ctx,
-                            <#self_ty as #crate_name::OutputType>::type_name(),
+                            C::type_name(),
                             &mut resolve_fut,
                         )
                         .await
                     })
+                }
+
+                if hooks {
+                    resolve_with_hooks(*self, ctx)
                 } else {
-                    ::std::boxed::Box::pin(async move {
-                        #crate_name::resolver_utils::ContainerType::resolve_field(root, &ctx).await
-                    })
+                    resolve(*self, ctx)
                 }
             }
 
