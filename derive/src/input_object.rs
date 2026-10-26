@@ -246,12 +246,12 @@ pub fn generate(object_args: &args::InputObject) -> GeneratorResult<TokenStream>
 
         schema_fields.push(quote! {
             {
-                let mut input_value = #crate_name::registry::MetaInputValue::new(
-                    ::std::string::ToString::to_string(#name),
+                let input_value = #crate_name::registry::add_input_value(
+                    &mut fields,
+                    #name,
                     <#ty as #crate_name::InputType>::create_type_info(registry),
                 );
                 #(#input_sets)*
-                fields.insert(::std::borrow::ToOwned::to_owned(#name), input_value);
             }
         })
     }
