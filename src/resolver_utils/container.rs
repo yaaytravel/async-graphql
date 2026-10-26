@@ -274,6 +274,13 @@ async fn join_fields(fields: ServerResult<Fields<'_>>, parallel: bool) -> Server
     Ok(create_value_object(res))
 }
 
+/// Awaits a field's resolver through a trait object, so that the generated
+/// containers poll each type's resolver from a single place.
+#[doc(hidden)]
+pub async fn resolve_field_dyn(resolve_fut: ResolveFut<'_>) -> ServerResult<Option<Value>> {
+    resolve_fut.await
+}
+
 /// Runs a field's resolver through the request's extensions and the field's
 /// custom directives.
 #[doc(hidden)]

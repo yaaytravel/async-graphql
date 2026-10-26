@@ -461,31 +461,25 @@ pub fn gen_erased_container(
                 fn resolve<'a, C: #crate_name::resolver_utils::ContainerType + ?::std::marker::Sized>(
                     root: &'a C,
                     ctx: #crate_name::Context<'a>,
-                ) -> #crate_name::resolver_utils::BoxFieldResult<'a> {
-                    ::std::boxed::Box::pin(async move { root.resolve_field(&ctx).await })
-                }
-
-                fn resolve_with_hooks<'a, C: #crate_name::resolver_utils::ContainerType + ?::std::marker::Sized>(
-                    root: &'a C,
-                    ctx: #crate_name::Context<'a>,
+                    hooks: bool,
                 ) -> #crate_name::resolver_utils::BoxFieldResult<'a> {
                     ::std::boxed::Box::pin(async move {
                         let resolve_fut = root.resolve_field(&ctx);
                         let mut resolve_fut = HookedField(::std::pin::pin!(resolve_fut));
-                        #crate_name::resolver_utils::resolve_field_with_hooks(
-                            &ctx,
-                            C::type_name(),
-                            &mut resolve_fut,
-                        )
-                        .await
+                        if hooks {
+                            #crate_name::resolver_utils::resolve_field_with_hooks(
+                                &ctx,
+                                C::type_name(),
+                                &mut resolve_fut,
+                            )
+                            .await
+                        } else {
+                            #crate_name::resolver_utils::resolve_field_dyn(&mut resolve_fut).await
+                        }
                     })
                 }
 
-                if hooks {
-                    resolve_with_hooks(*self, ctx)
-                } else {
-                    resolve(*self, ctx)
-                }
+                resolve(*self, ctx, hooks)
             }
 
             fn erased_type_name(&self) -> ::std::borrow::Cow<'static, ::std::primitive::str> {
