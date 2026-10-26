@@ -38,6 +38,14 @@ pub trait ContainerType: OutputType {
         ctx: &Context<'_>,
     ) -> impl Future<Output = ServerResult<Option<Value>>> + Send;
 
+    /// Resolves a field without a future, when its value needs neither the
+    /// selection set nor any async work, as for a `SimpleObject` field holding a
+    /// scalar. Returns `None` to resolve it through `resolve_field` instead.
+    #[doc(hidden)]
+    fn resolve_field_now(&self, _ctx: &Context<'_>) -> Option<Value> {
+        None
+    }
+
     /// Collect all the fields of the container that are queried in the
     /// selection set.
     ///
@@ -142,6 +150,11 @@ pub trait ErasedContainer<'a>: Send + Sync {
     /// Resolves a field. With `hooks`, the field also runs through the
     /// request's extensions and the field's custom directives.
     fn erased_resolve_field(&self, ctx: Context<'a>, hooks: bool) -> BoxFieldResult<'a>;
+    /// Resolves a field without a future, if the container can. See
+    /// [`ContainerType::resolve_field_now`].
+    fn erased_resolve_field_now(&self, _ctx: &Context<'a>) -> Option<Value> {
+        None
+    }
     /// The container's GraphQL type name.
     fn erased_type_name(&self) -> Cow<'static, str>;
     /// The container's concrete type name for `__typename` and fragments.
@@ -160,6 +173,10 @@ pub trait ErasedContainer<'a>: Send + Sync {
 pub struct GenericContainer<'a, T: ?Sized>(pub &'a T);
 
 impl<'a, T: ContainerType + ?Sized> ErasedContainer<'a> for GenericContainer<'a, T> {
+    fn erased_resolve_field_now(&self, ctx: &Context<'a>) -> Option<Value> {
+        T::resolve_field_now(self.0, ctx)
+    }
+
     fn erased_resolve_field(&self, ctx: Context<'a>, hooks: bool) -> BoxFieldResult<'a> {
         let root = self.0;
         if hooks {
@@ -477,6 +494,13 @@ impl<'a> Fields<'a> {
 
                     let hooks = ctx.query_env.extensions.has_resolve_hooks()
                         || !field.node.directives.is_empty();
+                    if !hooks && let Some(value) = root.erased_resolve_field_now(&ctx_field) {
+                        self.futures.push(FieldFuture {
+                            name: field_name,
+                            state: FieldState::Done(value),
+                        });
+                        continue;
+                    }
                     self.push(field_name, root.erased_resolve_field(ctx_field, hooks));
                 }
                 selection => {

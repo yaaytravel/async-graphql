@@ -492,6 +492,13 @@ pub fn gen_erased_container(
                 }
             }
 
+            fn erased_resolve_field_now(
+                &self,
+                ctx: &#crate_name::Context<'__erased>,
+            ) -> ::std::option::Option<#crate_name::Value> {
+                #crate_name::resolver_utils::ContainerType::resolve_field_now(*self, ctx)
+            }
+
             fn erased_type_name(&self) -> ::std::borrow::Cow<'static, ::std::primitive::str> {
                 <#self_ty as #crate_name::OutputType>::type_name()
             }

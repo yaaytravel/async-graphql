@@ -96,6 +96,7 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
     };
     let mut getters = Vec::new();
     let mut resolvers = Vec::new();
+    let mut now_resolvers = Vec::new();
     let mut flattened_resolvers = Vec::new();
     let mut schema_fields = Vec::new();
 
@@ -371,6 +372,13 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
             // rather than through the blanket `OutputType for &T`.
             let value = if owned { quote!(&obj) } else { quote!(obj) };
             let resolve_value = gen_resolve_field_value(&crate_name, value, true);
+            // A plain borrowed field can skip its future when its type resolves
+            // without one. Guarded, owned and derived fields always take one.
+            if guard.is_none() && !owned && derived.is_none() {
+                now_resolvers.push(quote! {
+                    #field_name => #crate_name::OutputType::resolve_now(&self.#base_ident),
+                });
+            }
             resolvers.push(quote! {
                 #field_name => {
                     #guard
@@ -511,6 +519,19 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
         };
     }
 
+    let resolve_field_now = if now_resolvers.is_empty() {
+        quote!()
+    } else {
+        quote! {
+            fn resolve_field_now(&self, ctx: &#crate_name::Context<'_>) -> ::std::option::Option<#crate_name::Value> {
+                match ctx.item.node.name.node.as_str() {
+                    #(#now_resolvers)*
+                    _ => ::std::option::Option::None,
+                }
+            }
+        }
+    };
+
     let field_match = if resolvers.is_empty() {
         quote!()
     } else {
@@ -546,6 +567,7 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
             #boxed_trait
             impl #impl_generics #crate_name::resolver_utils::ContainerType for #ident #ty_generics #where_clause {
                 #collect_erased
+                #resolve_field_now
 
                 async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
                     #field_match
