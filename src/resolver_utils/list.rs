@@ -58,34 +58,43 @@ pub fn resolve_list<'b, T: OutputType + 'b>(
             pending.reserve(len.unwrap_or_default());
         }
         let ctx_idx = ctx.with_index(idx);
+        let resolve_fut: BoxValueFuture<'_> = Box::pin(async move {
+            OutputType::resolve(&item, &ctx_idx, field)
+                .await
+                .map_err(|err| ctx_idx.set_error_path(err))
+        });
         pending.push((
             idx,
-            Box::pin(async move {
-                if hooks {
-                    let resolve_fut = async {
-                        OutputType::resolve(&item, &ctx_idx, field)
-                            .await
-                            .map(Option::Some)
-                            .map_err(|err| ctx_idx.set_error_path(err))
-                    };
-                    futures_util::pin_mut!(resolve_fut);
-                    resolve_item_with_hooks(
-                        &ctx_idx,
-                        field,
-                        Vec::<T>::type_name(),
-                        T::qualified_type_name(),
-                        &mut resolve_fut,
-                    )
-                    .await
-                } else {
-                    OutputType::resolve(&item, &ctx_idx, field)
-                        .await
-                        .map_err(|err| ctx_idx.set_error_path(err))
-                }
-            }),
+            if hooks {
+                resolve_boxed_item_with_hooks(
+                    ctx.with_index(idx),
+                    field,
+                    Vec::<T>::type_name(),
+                    T::qualified_type_name(),
+                    resolve_fut,
+                )
+            } else {
+                resolve_fut
+            },
         ));
     }
     join_list(values, pending)
+}
+
+/// Wraps a list item's boxed future so that it runs through the request's
+/// extensions. Not generic, so the per-item future of each item type stays a
+/// plain resolve with no hooks branch.
+fn resolve_boxed_item_with_hooks<'a>(
+    ctx_idx: ContextSelectionSet<'a>,
+    field: &'a Positioned<Field>,
+    parent_type: Cow<'static, str>,
+    return_type: String,
+    resolve_fut: BoxValueFuture<'a>,
+) -> BoxValueFuture<'a> {
+    Box::pin(async move {
+        let mut resolve_fut = resolve_fut.map_ok(Some);
+        resolve_item_with_hooks(&ctx_idx, field, parent_type, return_type, &mut resolve_fut).await
+    })
 }
 
 /// Runs a list item's resolver through the request's extensions. Not generic,
