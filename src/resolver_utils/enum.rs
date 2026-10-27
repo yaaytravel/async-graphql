@@ -36,6 +36,24 @@ pub fn parse_enum<T: EnumType + InputType>(value: Value) -> InputValueResult<T> 
         })
 }
 
+/// The variant name a value names, if it is an enum or string value. Not
+/// generic, so derived enums share it.
+#[doc(hidden)]
+pub fn enum_name_of(value: &Value) -> Option<&str> {
+    match value {
+        Value::Enum(name) => Some(name.as_str()),
+        Value::String(name) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+/// The value for a derived enum's variant name. Not generic, so derived enums
+/// share it.
+#[doc(hidden)]
+pub fn enum_name_value(name: &'static str) -> Value {
+    Value::Enum(Name::new(name))
+}
+
 /// Convert the enum value into a GraphQL value.
 ///
 /// This can be used to implement `InputType::to_value` or

@@ -5,7 +5,7 @@ use syn::ItemImpl;
 use crate::{
     args::{self, RenameTarget},
     utils::{
-        GeneratorResult, gen_boxed_trait, get_crate_path, get_rustdoc, get_type_path_and_name,
+        GeneratorResult, gen_ready_resolve, get_crate_path, get_rustdoc, get_type_path_and_name,
         visible_fn,
     },
 };
@@ -15,7 +15,6 @@ pub fn generate(
     item_impl: &mut ItemImpl,
 ) -> GeneratorResult<TokenStream> {
     let crate_name = get_crate_path(&scalar_args.crate_path, scalar_args.internal);
-    let boxed_trait = gen_boxed_trait(&crate_name);
     let self_name = get_type_path_and_name(item_impl.self_ty.as_ref())?.1;
     let gql_typename = if !scalar_args.name_type {
         let name = scalar_args
@@ -66,6 +65,8 @@ pub fn generate(
         None => quote! { ::std::option::Option::None },
     };
 
+    let ready_resolve =
+        gen_ready_resolve(&crate_name, quote!(#crate_name::ScalarType::to_value(self)));
     let expanded = quote! {
         #item_impl
 
@@ -105,7 +106,6 @@ pub fn generate(
         }
 
         #[allow(clippy::all, clippy::pedantic)]
-        #boxed_trait
         impl #generic #crate_name::OutputType for #self_ty #where_clause {
             fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
                 #gql_typename
@@ -125,13 +125,11 @@ pub fn generate(
                 })
             }
 
-            async fn resolve(
-                &self,
-                _: &#crate_name::ContextSelectionSet<'_>,
-                _field: &#crate_name::Positioned<#crate_name::parser::types::Field>
-            ) -> #crate_name::ServerResult<#crate_name::Value> {
-                ::std::result::Result::Ok(#crate_name::ScalarType::to_value(self))
+            fn resolve_now(&self) -> ::std::option::Option<#crate_name::Value> {
+                ::std::option::Option::Some(#crate_name::ScalarType::to_value(self))
             }
+
+            #ready_resolve
         }
     };
     Ok(expanded.into())

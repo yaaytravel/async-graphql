@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::BTreeSet};
+use std::{borrow::Cow, collections::BTreeSet, future::Future};
 
 use crate::{
     ContextSelectionSet, InputType, InputValueError, InputValueResult, OutputType, Positioned,
@@ -45,7 +45,6 @@ impl<T: InputType + Ord> InputType for BTreeSet<T> {
     }
 }
 
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 impl<T: OutputType + Ord> OutputType for BTreeSet<T> {
     fn type_name() -> Cow<'static, str> {
         Cow::Owned(format!("[{}]", T::qualified_type_name()))
@@ -60,11 +59,11 @@ impl<T: OutputType + Ord> OutputType for BTreeSet<T> {
         Self::qualified_type_name()
     }
 
-    async fn resolve(
-        &self,
-        ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
-    ) -> ServerResult<Value> {
-        resolve_list(ctx, field, self, Some(self.len())).await
+    fn resolve<'a>(
+        &'a self,
+        ctx: &'a ContextSelectionSet<'a>,
+        field: &'a Positioned<Field>,
+    ) -> impl Future<Output = ServerResult<Value>> + Send + 'a {
+        resolve_list(ctx, field, self, Some(self.len()))
     }
 }

@@ -1,18 +1,18 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{borrow::Cow, future::Future, pin::Pin, sync::Arc, task::Poll};
 
-use futures_util::FutureExt;
 use indexmap::IndexMap;
 
 use crate::{
-    Context, ContextBase, ContextSelectionSet, Error, Name, OutputType, ServerError, ServerResult,
-    Value, extensions::ResolveInfo, parser::types::Selection,
+    Context, ContextBase, ContextSelectionSet, Error, Name, OutputType, QueryPathNode,
+    QueryPathSegment, ServerError, ServerResult, Value,
+    extensions::{ResolveFut, ResolveInfo},
+    parser::types::Selection,
 };
 
 /// Represents a GraphQL container object.
 ///
 /// This helper trait allows the type to call `resolve_container` on itself in
 /// its `OutputType::resolve` implementation.
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 pub trait ContainerType: OutputType {
     /// This function returns true of type `EmptyMutation` only.
     #[doc(hidden)]
@@ -24,18 +24,30 @@ pub trait ContainerType: OutputType {
     /// `async_graphql::Value`.
     ///
     /// If the field was not found returns None.
-    #[cfg(feature = "boxed-trait")]
-    async fn resolve_field(&self, ctx: &Context<'_>) -> ServerResult<Option<Value>>;
-
-    /// Resolves a field value and outputs it as a json value
-    /// `async_graphql::Value`.
     ///
-    /// If the field was not found returns None.
-    #[cfg(not(feature = "boxed-trait"))]
-    fn resolve_field(
-        &self,
-        ctx: &Context<'_>,
-    ) -> impl Future<Output = ServerResult<Option<Value>>> + Send;
+    /// The container and the context share one lifetime, so an implementation
+    /// can return a field's future directly. An `async fn` with separate
+    /// lifetimes still implements it.
+    fn resolve_field<'a>(
+        &'a self,
+        ctx: &'a Context<'a>,
+    ) -> impl Future<Output = ServerResult<Option<Value>>> + Send + 'a;
+
+    /// Resolves a field into a boxed future that owns its context. The erased
+    /// containers the derives generate resolve fields through this, so a
+    /// container can return a field's future without an `async fn` of its own.
+    #[doc(hidden)]
+    fn resolve_field_boxed<'a>(&'a self, ctx: Context<'a>) -> BoxFieldResult<'a> {
+        Box::pin(async move { self.resolve_field(&ctx).await })
+    }
+
+    /// Resolves a field without a future, when its value needs neither the
+    /// selection set nor any async work, as for a `SimpleObject` field holding a
+    /// scalar. Returns `None` to resolve it through `resolve_field` instead.
+    #[doc(hidden)]
+    fn resolve_field_now(&self, _ctx: &Context<'_>) -> Option<Value> {
+        None
+    }
 
     /// Collect all the fields of the container that are queried in the
     /// selection set.
@@ -56,15 +68,6 @@ pub trait ContainerType: OutputType {
     /// Find the GraphQL entity with the given name from the parameter.
     ///
     /// Objects should override this in case they are the query root.
-    #[cfg(feature = "boxed-trait")]
-    async fn find_entity(&self, _: &Context<'_>, _: &Value) -> ServerResult<Option<Value>> {
-        Ok(None)
-    }
-
-    /// Find the GraphQL entity with the given name from the parameter.
-    ///
-    /// Objects should override this in case they are the query root.
-    #[cfg(not(feature = "boxed-trait"))]
     fn find_entity(
         &self,
         _: &Context<'_>,
@@ -74,10 +77,12 @@ pub trait ContainerType: OutputType {
     }
 }
 
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 impl<T: ContainerType + ?Sized> ContainerType for &T {
-    async fn resolve_field(&self, ctx: &Context<'_>) -> ServerResult<Option<Value>> {
-        T::resolve_field(*self, ctx).await
+    fn resolve_field<'a>(
+        &'a self,
+        ctx: &'a Context<'a>,
+    ) -> impl Future<Output = ServerResult<Option<Value>>> + Send + 'a {
+        T::resolve_field(*self, ctx)
     }
 
     async fn find_entity(&self, ctx: &Context<'_>, params: &Value) -> ServerResult<Option<Value>> {
@@ -85,10 +90,12 @@ impl<T: ContainerType + ?Sized> ContainerType for &T {
     }
 }
 
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 impl<T: ContainerType + ?Sized> ContainerType for Arc<T> {
-    async fn resolve_field(&self, ctx: &Context<'_>) -> ServerResult<Option<Value>> {
-        T::resolve_field(self, ctx).await
+    fn resolve_field<'a>(
+        &'a self,
+        ctx: &'a Context<'a>,
+    ) -> impl Future<Output = ServerResult<Option<Value>>> + Send + 'a {
+        T::resolve_field(self, ctx)
     }
 
     async fn find_entity(&self, ctx: &Context<'_>, params: &Value) -> ServerResult<Option<Value>> {
@@ -96,10 +103,12 @@ impl<T: ContainerType + ?Sized> ContainerType for Arc<T> {
     }
 }
 
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 impl<T: ContainerType + ?Sized> ContainerType for Box<T> {
-    async fn resolve_field(&self, ctx: &Context<'_>) -> ServerResult<Option<Value>> {
-        T::resolve_field(self, ctx).await
+    fn resolve_field<'a>(
+        &'a self,
+        ctx: &'a Context<'a>,
+    ) -> impl Future<Output = ServerResult<Option<Value>>> + Send + 'a {
+        T::resolve_field(self, ctx)
     }
 
     async fn find_entity(&self, ctx: &Context<'_>, params: &Value) -> ServerResult<Option<Value>> {
@@ -107,12 +116,16 @@ impl<T: ContainerType + ?Sized> ContainerType for Box<T> {
     }
 }
 
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 impl<T: ContainerType, E: Into<Error> + Send + Sync + Clone> ContainerType for Result<T, E> {
-    async fn resolve_field(&self, ctx: &Context<'_>) -> ServerResult<Option<Value>> {
+    fn resolve_field<'a>(
+        &'a self,
+        ctx: &'a Context<'a>,
+    ) -> impl Future<Output = ServerResult<Option<Value>>> + Send + 'a {
         match self {
-            Ok(value) => T::resolve_field(value, ctx).await,
-            Err(err) => Err(ctx.set_error_path(err.clone().into().into_server_error(ctx.item.pos))),
+            Ok(value) => futures_util::future::Either::Left(T::resolve_field(value, ctx)),
+            Err(err) => futures_util::future::Either::Right(std::future::ready(Err(
+                ctx.set_error_path(err.clone().into().into_server_error(ctx.item.pos))
+            ))),
         }
     }
 
@@ -124,24 +137,133 @@ impl<T: ContainerType, E: Into<Error> + Send + Sync + Clone> ContainerType for R
     }
 }
 
+#[doc(hidden)]
+pub type BoxFieldResult<'a> =
+    Pin<Box<dyn Future<Output = ServerResult<Option<Value>>> + Send + 'a>>;
+
+/// Object-safe view of a borrowed [`ContainerType`], so field collection is
+/// compiled once instead of once per GraphQL type.
+///
+/// The derive macros implement it for `&Self` on every type they generate, so
+/// resolving one object type and then the next goes through no generic library
+/// code. Generic code instantiated once per type would otherwise nest once per
+/// type along a chain of object types and hit rustc's recursion limit.
+/// Hand-written containers go through [`GenericContainer`] instead.
+#[doc(hidden)]
+pub trait ErasedContainer<'a>: Send + Sync {
+    /// Resolves a field. With `hooks`, the field also runs through the
+    /// request's extensions and the field's custom directives.
+    fn erased_resolve_field(&self, ctx: Context<'a>, hooks: bool) -> BoxFieldResult<'a>;
+    /// Resolves a field without a future, if the container can. See
+    /// [`ContainerType::resolve_field_now`].
+    fn erased_resolve_field_now(&self, _ctx: &Context<'a>) -> Option<Value> {
+        None
+    }
+    /// The container's GraphQL type name.
+    fn erased_type_name(&self) -> Cow<'static, str>;
+    /// The container's concrete type name for `__typename` and fragments.
+    fn erased_introspection_type_name(&self) -> Cow<'static, str>;
+    /// Collects the container's fields selected by `ctx`.
+    fn erased_collect_all_fields(
+        &self,
+        ctx: &ContextSelectionSet<'a>,
+        fields: &mut Fields<'a>,
+    ) -> ServerResult<()>;
+}
+
+/// The generic [`ErasedContainer`] for containers the derive macros did not
+/// generate, such as hand-written `ContainerType` impls.
+#[doc(hidden)]
+pub struct GenericContainer<'a, T: ?Sized>(pub &'a T);
+
+impl<'a, T: ContainerType + ?Sized> ErasedContainer<'a> for GenericContainer<'a, T> {
+    fn erased_resolve_field_now(&self, ctx: &Context<'a>) -> Option<Value> {
+        T::resolve_field_now(self.0, ctx)
+    }
+
+    fn erased_resolve_field(&self, ctx: Context<'a>, hooks: bool) -> BoxFieldResult<'a> {
+        let root = self.0;
+        if hooks {
+            Box::pin(async move {
+                let resolve_fut = root.resolve_field(&ctx);
+                futures_util::pin_mut!(resolve_fut);
+                resolve_field_with_hooks(&ctx, T::type_name(), &mut resolve_fut).await
+            })
+        } else {
+            Box::pin(async move { root.resolve_field(&ctx).await })
+        }
+    }
+
+    fn erased_type_name(&self) -> Cow<'static, str> {
+        T::type_name()
+    }
+
+    fn erased_introspection_type_name(&self) -> Cow<'static, str> {
+        T::introspection_type_name(self.0)
+    }
+
+    fn erased_collect_all_fields(
+        &self,
+        ctx: &ContextSelectionSet<'a>,
+        fields: &mut Fields<'a>,
+    ) -> ServerResult<()> {
+        T::collect_all_fields(self.0, ctx, fields)
+    }
+}
+
+/// The future for a field holding `value`, resolved with the field's
+/// selection set. Generic only over the field's type, so every field of that
+/// type, in any container, shares it.
+#[doc(hidden)]
+pub fn resolve_field_value<'a, T: OutputType + ?Sized>(
+    value: &'a T,
+    ctx: Context<'a>,
+) -> BoxFieldResult<'a> {
+    Box::pin(async move {
+        OutputType::resolve(
+            value,
+            &ctx.with_selection_set(&ctx.item.node.selection_set),
+            ctx.item,
+        )
+        .await
+        .map(Some)
+        .map_err(|err| ctx.set_error_path(err))
+    })
+}
+
 /// Resolve an container by executing each of the fields concurrently.
-pub async fn resolve_container<'a, T: ContainerType + ?Sized>(
+pub fn resolve_container<'a, T: ContainerType + ?Sized>(
     ctx: &ContextSelectionSet<'a>,
     root: &'a T,
-) -> ServerResult<Value> {
-    resolve_container_inner(ctx, root, true).await
+) -> impl Future<Output = ServerResult<Value>> + Send {
+    join_fields(Fields::collect(ctx, root, true), true)
 }
 
 /// Resolve an container by executing each of the fields serially.
-pub async fn resolve_container_serial<'a, T: ContainerType + ?Sized>(
+pub fn resolve_container_serial<'a, T: ContainerType + ?Sized>(
     ctx: &ContextSelectionSet<'a>,
     root: &'a T,
-) -> ServerResult<Value> {
-    resolve_container_inner(ctx, root, false).await
+) -> impl Future<Output = ServerResult<Value>> + Send {
+    join_fields(Fields::collect(ctx, root, false), false)
+}
+
+/// Resolve an erased container, concurrently or serially. The derive macros
+/// call this with their generated [`ErasedContainer`] impl.
+#[doc(hidden)]
+pub fn resolve_container_dyn<'a>(
+    ctx: &'a ContextSelectionSet<'a>,
+    root: &dyn ErasedContainer<'a>,
+    parallel: bool,
+) -> impl Future<Output = ServerResult<Value>> + Send + use<'a> {
+    // `root` is only used to collect the fields, so the future does not
+    // borrow it, and a derived `resolve` can pass a reference to its local.
+    let mut fields = Fields::new(ctx, parallel);
+    let fields = fields.add_set_erased(ctx, root).map(|()| fields);
+    join_fields(fields, parallel)
 }
 
 pub(crate) fn create_value_object(values: Vec<(Name, Value)>) -> Value {
-    let mut map = IndexMap::new();
+    let mut map = IndexMap::with_capacity(values.len());
     for (name, value) in values {
         insert_value(&mut map, name, value);
     }
@@ -174,33 +296,203 @@ fn insert_value(target: &mut IndexMap<Name, Value>, name: Name, value: Value) {
     }
 }
 
-async fn resolve_container_inner<'a, T: ContainerType + ?Sized>(
-    ctx: &ContextSelectionSet<'a>,
-    root: &'a T,
-    parallel: bool,
-) -> ServerResult<Value> {
-    let mut fields = Fields(Vec::new());
-    fields.add_set(ctx, root)?;
+/// Above this many fields, `try_join_all` (which only polls the fields that
+/// were woken) is used instead of polling every pending field on each wake.
+const JOIN_IN_PLACE_MAX: usize = 32;
 
-    let res = if parallel {
-        futures_util::future::try_join_all(fields.0).await?
-    } else {
-        let mut results = Vec::with_capacity(fields.0.len());
-        for field in fields.0 {
-            results.push(field.await?);
-        }
-        results
-    };
-
-    Ok(create_value_object(res))
+async fn join_fields(fields: ServerResult<Fields<'_>>, parallel: bool) -> ServerResult<Value> {
+    let fields = fields?.futures;
+    if parallel && fields.len() > JOIN_IN_PLACE_MAX {
+        let res = futures_util::future::try_join_all(fields.into_iter().map(|field| async move {
+            let value = match field.state {
+                FieldState::Pending(fut) => fut.await?.unwrap_or_default(),
+                FieldState::Done(value) => value,
+            };
+            Ok::<_, ServerError>((field.name, value))
+        }))
+        .await?;
+        return Ok(create_value_object(res));
+    }
+    JoinFields { fields, parallel }.await
 }
 
-type BoxFieldFuture<'a> = Pin<Box<dyn Future<Output = ServerResult<(Name, Value)>> + 'a + Send>>;
+/// Waits for every field of a container in place: each slot's future is
+/// replaced by its value, and the values are moved into the result object, so
+/// no other list is allocated. Serially, a field is only polled once every
+/// field before it has its value.
+struct JoinFields<'a> {
+    fields: Vec<FieldFuture<'a>>,
+    parallel: bool,
+}
+
+impl Future for JoinFields<'_> {
+    type Output = ServerResult<Value>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let mut done = true;
+        for field in &mut this.fields {
+            if let FieldState::Pending(fut) = &mut field.state {
+                match fut.as_mut().poll(cx) {
+                    Poll::Ready(Ok(value)) => {
+                        field.state = FieldState::Done(value.unwrap_or_default())
+                    }
+                    Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                    Poll::Pending if this.parallel => done = false,
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+        }
+        if !done {
+            return Poll::Pending;
+        }
+        let mut map = IndexMap::with_capacity(this.fields.len());
+        for field in this.fields.drain(..) {
+            if let FieldState::Done(value) = field.state {
+                insert_value(&mut map, field.name, value);
+            }
+        }
+        Poll::Ready(Ok(Value::Object(map)))
+    }
+}
+
+/// Wraps a field's boxed future so that it runs through the request's
+/// extensions and the field's custom directives. Not generic, so the derives
+/// share it for every container type.
+#[doc(hidden)]
+pub fn resolve_boxed_field_with_hooks<'a>(
+    ctx: Context<'a>,
+    type_name: Cow<'static, str>,
+    mut resolve_fut: BoxFieldResult<'a>,
+) -> BoxFieldResult<'a> {
+    Box::pin(async move { resolve_field_with_hooks(&ctx, type_name, &mut resolve_fut).await })
+}
+
+/// Runs a field's resolver through the request's extensions and the field's
+/// custom directives.
+#[doc(hidden)]
+pub async fn resolve_field_with_hooks(
+    ctx_field: &Context<'_>,
+    type_name: Cow<'static, str>,
+    resolve_fut: ResolveFut<'_>,
+) -> ServerResult<Option<Value>> {
+    let field = ctx_field.item;
+    let field_name = &field.node.response_key().node;
+    let extensions = &ctx_field.query_env.extensions;
+    let resolve_info = ResolveInfo {
+        path_node: ctx_field.path_node.as_ref().unwrap(),
+        parent_type: &type_name,
+        return_type: match ctx_field
+            .schema_env
+            .registry
+            .types
+            .get(type_name.as_ref())
+            .and_then(|ty| ty.field_by_name(field.node.name.node.as_str()))
+            .map(|field| &field.ty)
+        {
+            Some(ty) => &ty,
+            None => {
+                return Err(ServerError::new(
+                    format!(
+                        r#"Cannot query field "{}" on type "{}"."#,
+                        field_name, type_name
+                    ),
+                    Some(ctx_field.item.pos),
+                ));
+            }
+        },
+        name: field.node.name.node.as_str(),
+        alias: field.node.alias.as_ref().map(|alias| alias.node.as_str()),
+        is_for_introspection: ctx_field.is_for_introspection,
+        field: &field.node,
+    };
+
+    if field.node.directives.is_empty() {
+        return extensions.resolve(resolve_info, resolve_fut).await;
+    }
+
+    let mut resolve_fut: BoxFieldResult<'_> = Box::pin(resolve_fut);
+    for directive in &field.node.directives {
+        if let Some(directive_factory) = ctx_field
+            .schema_env
+            .custom_directives
+            .get(directive.node.name.node.as_str())
+        {
+            let ctx_directive = ContextBase {
+                path_node: ctx_field.path_node,
+                is_for_introspection: false,
+                item: directive,
+                schema_env: ctx_field.schema_env,
+                query_env: ctx_field.query_env,
+                execute_data: ctx_field.execute_data,
+            };
+            let directive_instance = directive_factory.create(&ctx_directive, &directive.node)?;
+            resolve_fut = Box::pin({
+                let ctx_field = ctx_field.clone();
+                async move {
+                    directive_instance
+                        .resolve_field(&ctx_field, &mut resolve_fut)
+                        .await
+                }
+            });
+        }
+    }
+
+    extensions.resolve(resolve_info, &mut resolve_fut).await
+}
+
+/// A selected field: its response key, and the future that resolves its value
+/// until the value is there.
+struct FieldFuture<'a> {
+    name: Name,
+    state: FieldState<'a>,
+}
+
+enum FieldState<'a> {
+    Pending(BoxFieldResult<'a>),
+    Done(Value),
+}
 
 /// A set of fields on an container that are being selected.
-pub struct Fields<'a>(Vec<BoxFieldFuture<'a>>);
+pub struct Fields<'a> {
+    futures: Vec<FieldFuture<'a>>,
+    /// Path of the container. Every field context points at this node rather
+    /// than at the `ContextSelectionSet` it was collected from, because
+    /// fragment selection sets are collected through temporary contexts that
+    /// carry a copy of the same path.
+    parent_path: Option<&'a QueryPathNode<'a>>,
+    /// Whether a field that resolves without a future may get its value while
+    /// the fields are collected. Not for serial containers, where a field must
+    /// only resolve once every field before it has.
+    eager: bool,
+}
 
 impl<'a> Fields<'a> {
+    fn new(ctx: &'a ContextSelectionSet<'a>, eager: bool) -> Self {
+        Fields {
+            futures: Vec::with_capacity(ctx.item.node.items.len()),
+            parent_path: ctx.path_node.as_ref(),
+            eager,
+        }
+    }
+
+    fn collect<T: ContainerType + ?Sized>(
+        ctx: &'a ContextSelectionSet<'a>,
+        root: &'a T,
+        eager: bool,
+    ) -> ServerResult<Self> {
+        let mut fields = Fields::new(ctx, eager);
+        fields.add_set(ctx, root)?;
+        Ok(fields)
+    }
+
+    fn push(&mut self, name: Name, value: BoxFieldResult<'a>) {
+        self.futures.push(FieldFuture {
+            name,
+            state: FieldState::Pending(value),
+        });
+    }
+
     /// Add another set of fields to this set of fields using the given
     /// container.
     pub fn add_set<T: ContainerType + ?Sized>(
@@ -208,123 +500,55 @@ impl<'a> Fields<'a> {
         ctx: &ContextSelectionSet<'a>,
         root: &'a T,
     ) -> ServerResult<()> {
+        self.add_set_erased(ctx, &GenericContainer(root))
+    }
+
+    /// Add another set of fields using an erased container. The derive macros
+    /// call this from their generated `collect_all_fields`.
+    #[doc(hidden)]
+    pub fn add_set_erased(
+        &mut self,
+        ctx: &ContextSelectionSet<'a>,
+        root: &dyn ErasedContainer<'a>,
+    ) -> ServerResult<()> {
         for selection in &ctx.item.node.items {
             match &selection.node {
                 Selection::Field(field) => {
-                    if field.node.name.node == "__typename" {
-                        // Get the typename
-                        let ctx_field = ctx.with_field(field);
-                        let field_name = ctx_field.item.node.response_key().node.clone();
-                        let typename = root.introspection_type_name().into_owned();
+                    let ctx_field = ContextBase {
+                        path_node: Some(QueryPathNode {
+                            parent: self.parent_path,
+                            segment: QueryPathSegment::Name(&field.node.response_key().node),
+                        }),
+                        is_for_introspection: ctx.is_for_introspection,
+                        item: field,
+                        schema_env: ctx.schema_env,
+                        query_env: ctx.query_env,
+                        execute_data: ctx.execute_data,
+                    };
+                    let field_name = ctx_field.item.node.response_key().node.clone();
 
-                        self.0.push(Box::pin(async move {
-                            Ok((field_name, Value::String(typename)))
-                        }));
+                    if field.node.name.node == "__typename" {
+                        let typename = root.erased_introspection_type_name().into_owned();
+                        self.futures.push(FieldFuture {
+                            name: field_name,
+                            state: FieldState::Done(Value::String(typename)),
+                        });
                         continue;
                     }
 
-                    let resolve_fut = Box::pin({
-                        let ctx = ctx.clone();
-                        async move {
-                            let ctx_field = ctx.with_field(field);
-                            let field_name = ctx_field.item.node.response_key().node.clone();
-                            let extensions = &ctx.query_env.extensions;
-
-                            if extensions.is_empty() && field.node.directives.is_empty() {
-                                Ok((
-                                    field_name,
-                                    root.resolve_field(&ctx_field).await?.unwrap_or_default(),
-                                ))
-                            } else {
-                                let type_name = T::type_name();
-                                let resolve_info = ResolveInfo {
-                                    path_node: ctx_field.path_node.as_ref().unwrap(),
-                                    parent_type: &type_name,
-                                    return_type: match ctx_field
-                                        .schema_env
-                                        .registry
-                                        .types
-                                        .get(type_name.as_ref())
-                                        .and_then(|ty| {
-                                            ty.field_by_name(field.node.name.node.as_str())
-                                        })
-                                        .map(|field| &field.ty)
-                                    {
-                                        Some(ty) => &ty,
-                                        None => {
-                                            return Err(ServerError::new(
-                                                format!(
-                                                    r#"Cannot query field "{}" on type "{}"."#,
-                                                    field_name, type_name
-                                                ),
-                                                Some(ctx_field.item.pos),
-                                            ));
-                                        }
-                                    },
-                                    name: field.node.name.node.as_str(),
-                                    alias: field
-                                        .node
-                                        .alias
-                                        .as_ref()
-                                        .map(|alias| alias.node.as_str()),
-                                    is_for_introspection: ctx_field.is_for_introspection,
-                                    field: &field.node,
-                                };
-
-                                let resolve_fut = root.resolve_field(&ctx_field);
-
-                                if field.node.directives.is_empty() {
-                                    futures_util::pin_mut!(resolve_fut);
-                                    Ok((
-                                        field_name,
-                                        extensions
-                                            .resolve(resolve_info, &mut resolve_fut)
-                                            .await?
-                                            .unwrap_or_default(),
-                                    ))
-                                } else {
-                                    let mut resolve_fut = resolve_fut.boxed();
-
-                                    for directive in &field.node.directives {
-                                        if let Some(directive_factory) = ctx
-                                            .schema_env
-                                            .custom_directives
-                                            .get(directive.node.name.node.as_str())
-                                        {
-                                            let ctx_directive = ContextBase {
-                                                path_node: ctx_field.path_node,
-                                                is_for_introspection: false,
-                                                item: directive,
-                                                schema_env: ctx_field.schema_env,
-                                                query_env: ctx_field.query_env,
-                                                execute_data: ctx_field.execute_data,
-                                            };
-                                            let directive_instance = directive_factory
-                                                .create(&ctx_directive, &directive.node)?;
-                                            resolve_fut = Box::pin({
-                                                let ctx_field = ctx_field.clone();
-                                                async move {
-                                                    directive_instance
-                                                        .resolve_field(&ctx_field, &mut resolve_fut)
-                                                        .await
-                                                }
-                                            });
-                                        }
-                                    }
-
-                                    Ok((
-                                        field_name,
-                                        extensions
-                                            .resolve(resolve_info, &mut resolve_fut)
-                                            .await?
-                                            .unwrap_or_default(),
-                                    ))
-                                }
-                            }
-                        }
-                    });
-
-                    self.0.push(resolve_fut);
+                    let hooks = ctx.query_env.extensions.has_resolve_hooks()
+                        || !field.node.directives.is_empty();
+                    if self.eager
+                        && !hooks
+                        && let Some(value) = root.erased_resolve_field_now(&ctx_field)
+                    {
+                        self.futures.push(FieldFuture {
+                            name: field_name,
+                            state: FieldState::Done(value),
+                        });
+                        continue;
+                    }
+                    self.push(field_name, root.erased_resolve_field(ctx_field, hooks));
                 }
                 selection => {
                     let (type_condition, selection_set) = match selection {
@@ -357,7 +581,7 @@ impl<'a> Fields<'a> {
                     let type_condition =
                         type_condition.map(|condition| condition.node.on.node.as_str());
 
-                    let introspection_type_name = root.introspection_type_name();
+                    let introspection_type_name = root.erased_introspection_type_name();
 
                     let applies_concrete_object = type_condition.is_some_and(|condition| {
                         introspection_type_name == condition
@@ -369,10 +593,15 @@ impl<'a> Fields<'a> {
                                 .is_some_and(|interfaces| interfaces.contains(condition))
                     });
                     if applies_concrete_object {
-                        root.collect_all_fields(&ctx.with_selection_set(selection_set), self)?;
-                    } else if type_condition.is_none_or(|condition| T::type_name() == condition) {
+                        root.erased_collect_all_fields(
+                            &ctx.with_selection_set(selection_set),
+                            self,
+                        )?;
+                    } else if type_condition
+                        .is_none_or(|condition| root.erased_type_name() == condition)
+                    {
                         // The fragment applies to an interface type.
-                        self.add_set(&ctx.with_selection_set(selection_set), root)?;
+                        self.add_set_erased(&ctx.with_selection_set(selection_set), root)?;
                     }
                 }
             }

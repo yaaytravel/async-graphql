@@ -61,7 +61,6 @@ macro_rules! impl_input_string_for_smart_ptr {
 impl_input_string_for_smart_ptr!(Box<str>);
 impl_input_string_for_smart_ptr!(std::sync::Arc<str>);
 
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 impl OutputType for str {
     fn type_name() -> Cow<'static, str> {
         Cow::Borrowed("String")
@@ -69,6 +68,10 @@ impl OutputType for str {
 
     fn create_type_info(registry: &mut registry::Registry) -> String {
         <String as OutputType>::create_type_info(registry)
+    }
+
+    fn resolve_now(&self) -> Option<Value> {
+        Some(Value::String(self.to_string()))
     }
 
     async fn resolve(

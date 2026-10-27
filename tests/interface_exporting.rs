@@ -2,12 +2,14 @@ use async_graphql::*;
 use serde::Deserialize;
 
 #[derive(SimpleObject)]
+#[graphql(getters)]
 struct ObjectA {
     id: i32,
     title: String,
 }
 
 #[derive(SimpleObject)]
+#[graphql(getters)]
 struct ObjectB {
     id: i32,
     title: String,
@@ -36,6 +38,7 @@ enum InvisibleInterface {
 }
 
 #[derive(SimpleObject)]
+#[graphql(getters)]
 struct ObjectC {
     id: i32,
     title: String,

@@ -13,14 +13,13 @@ use crate::{
     },
     output_type::OutputType,
     utils::{
-        GeneratorResult, RemoveLifetime, gen_boxed_trait, gen_deprecation, gen_directive_calls,
-        generate_default, get_crate_path, get_rustdoc, visible_fn,
+        GeneratorResult, RemoveLifetime, gen_deprecation, gen_directive_calls,
+        gen_erased_container, generate_default, get_crate_path, get_rustdoc, visible_fn,
     },
 };
 
 pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream> {
     let crate_name = get_crate_path(&interface_args.crate_path, interface_args.internal);
-    let boxed_trait = gen_boxed_trait(&crate_name);
     let ident = &interface_args.ident;
     let type_params = interface_args.generics.type_params().collect::<Vec<_>>();
     let (impl_generics, ty_generics, where_clause) = interface_args.generics.split_for_impl();
@@ -343,21 +342,23 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
 
             schema_args.push(quote! {
                 {
-                    let mut arg = #crate_name::registry::MetaInputValue::new(
-                        ::std::string::ToString::to_string(#name),
+                    let arg = #crate_name::registry::add_input_value(
+                        &mut field.args,
+                        #name,
                         <#ty as #crate_name::InputType>::create_type_info(registry),
                     );
                     #(#arg_sets)*
-                    field.args.insert(::std::string::ToString::to_string(#name), arg);
                 }
             });
         }
 
         for enum_name in &enum_names {
             calls.push(quote! {
-                #ident::#enum_name(obj) => obj.#method_name(#(#use_params),*)
-                    .await.map_err(|err| ::std::convert::Into::<#crate_name::Error>::into(err))
-                    .map(::std::convert::Into::into)
+                #ident::#enum_name(obj) => {
+                    use #crate_name::resolver_utils::{FieldReturnResult as _, FieldReturnValue as _};
+                    let value = obj.#method_name(#(#use_params),*).await;
+                    (&value).field_return_kind().convert(value).map(::std::convert::Into::into)
+                }
             });
         }
 
@@ -451,13 +452,15 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
         }
 
         schema_fields.push(quote! {
-            let mut field = #crate_name::registry::MetaField::new(
-                ::std::string::ToString::to_string(#name),
-                <#schema_ty as #crate_name::OutputType>::create_type_info(registry),
-            );
-            #(#schema_args)*
-            #(#field_sets)*
-            fields.insert(::std::string::ToString::to_string(#name), field);
+            {
+                let field = #crate_name::registry::add_field(
+                    &mut fields,
+                    #name,
+                    <#schema_ty as #crate_name::OutputType>::create_type_info(registry),
+                );
+                #(#schema_args)*
+                #(#field_sets)*
+            }
         });
 
         let resolve_obj = quote! {
@@ -487,6 +490,13 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
 
     let visible = visible_fn(&interface_args.visible);
     let field_count = schema_fields.len();
+    let (erased_impl, resolve_erased, _) = gen_erased_container(
+        &crate_name,
+        &quote!(#ident #ty_generics),
+        &interface_args.generics,
+        false,
+    );
+
     let expanded = quote! {
         #(#type_into_impls)*
 
@@ -496,7 +506,6 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
         }
 
         #[allow(clippy::all, clippy::pedantic)]
-        #boxed_trait
         impl #impl_generics #crate_name::resolver_utils::ContainerType for #ident #ty_generics #where_clause {
             async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
                 #(#resolvers)*
@@ -511,7 +520,6 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
         }
 
         #[allow(clippy::all, clippy::pedantic)]
-        #boxed_trait
         impl #impl_generics #crate_name::OutputType for #ident #ty_generics #where_clause {
             fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
                 #gql_typename
@@ -550,14 +558,10 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
                 })
             }
 
-            async fn resolve(
-                &self,
-                ctx: &#crate_name::ContextSelectionSet<'_>,
-                _field: &#crate_name::Positioned<#crate_name::parser::types::Field>,
-            ) -> #crate_name::ServerResult<#crate_name::Value> {
-                #crate_name::resolver_utils::resolve_container(ctx, self).await
-            }
+            #resolve_erased
         }
+
+        #erased_impl
 
         impl #impl_generics #crate_name::InterfaceType for #ident #ty_generics #where_clause {}
     };

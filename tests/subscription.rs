@@ -210,6 +210,7 @@ pub async fn test_subscription_inline_fragment() {
 #[tokio::test]
 pub async fn test_subscription_fragment() {
     #[derive(SimpleObject)]
+    #[graphql(getters)]
     struct Event {
         a: i32,
         b: i32,
@@ -259,6 +260,7 @@ pub async fn test_subscription_fragment() {
 #[tokio::test]
 pub async fn test_subscription_fragment2() {
     #[derive(SimpleObject)]
+    #[graphql(getters)]
     struct Event {
         a: i32,
         b: i32,

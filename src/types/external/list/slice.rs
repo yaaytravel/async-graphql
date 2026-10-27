@@ -1,11 +1,10 @@
-use std::{borrow::Cow, sync::Arc};
+use std::{borrow::Cow, future::Future, sync::Arc};
 
 use crate::{
     ContextSelectionSet, InputType, InputValueError, InputValueResult, OutputType, Positioned,
     ServerResult, Value, parser::types::Field, registry, resolver_utils::resolve_list,
 };
 
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 impl<'a, T: OutputType + 'a> OutputType for &'a [T] {
     fn type_name() -> Cow<'static, str> {
         Cow::Owned(format!("[{}]", T::qualified_type_name()))
@@ -20,18 +19,17 @@ impl<'a, T: OutputType + 'a> OutputType for &'a [T] {
         Self::qualified_type_name()
     }
 
-    async fn resolve(
-        &self,
-        ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
-    ) -> ServerResult<Value> {
-        resolve_list(ctx, field, self.iter(), Some(self.len())).await
+    fn resolve<'r>(
+        &'r self,
+        ctx: &'r ContextSelectionSet<'r>,
+        field: &'r Positioned<Field>,
+    ) -> impl Future<Output = ServerResult<Value>> + Send + 'r {
+        resolve_list(ctx, field, self.iter(), Some(self.len()))
     }
 }
 
 macro_rules! impl_output_slice_for_smart_ptr {
     ($ty:ty) => {
-        #[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
         impl<T: OutputType> OutputType for $ty {
             fn type_name() -> Cow<'static, str> {
                 Cow::Owned(format!("[{}]", T::qualified_type_name()))
@@ -46,12 +44,12 @@ macro_rules! impl_output_slice_for_smart_ptr {
                 Self::qualified_type_name()
             }
 
-            async fn resolve(
-                &self,
-                ctx: &ContextSelectionSet<'_>,
-                field: &Positioned<Field>,
-            ) -> ServerResult<Value> {
-                resolve_list(ctx, field, self.iter(), Some(self.len())).await
+            fn resolve<'a>(
+                &'a self,
+                ctx: &'a ContextSelectionSet<'a>,
+                field: &'a Positioned<Field>,
+            ) -> impl Future<Output = ServerResult<Value>> + Send + 'a {
+                resolve_list(ctx, field, self.iter(), Some(self.len()))
             }
         }
     };

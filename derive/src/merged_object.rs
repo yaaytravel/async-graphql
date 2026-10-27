@@ -7,7 +7,7 @@ use syn::{Error, LitInt};
 use crate::{
     args::{self, RenameTarget, TypeDirectiveLocation},
     utils::{
-        GeneratorResult, gen_boxed_trait, gen_directive_calls, get_crate_path, get_rustdoc,
+        GeneratorResult, gen_directive_calls, gen_erased_container, get_crate_path, get_rustdoc,
         visible_fn,
     },
 };
@@ -35,7 +35,6 @@ pub(crate) fn build_merge_tree_type(
 
 pub fn generate(object_args: &args::MergedObject) -> GeneratorResult<TokenStream> {
     let crate_name = get_crate_path(&object_args.crate_path, object_args.internal);
-    let boxed_trait = gen_boxed_trait(&crate_name);
     let ident = &object_args.ident;
     let (impl_generics, ty_generics, where_clause) = object_args.generics.split_for_impl();
     let extends = object_args.extends;
@@ -135,16 +134,18 @@ pub fn generate(object_args: &args::MergedObject) -> GeneratorResult<TokenStream
     };
 
     let visible = visible_fn(&object_args.visible);
-    let resolve_container = if object_args.serial {
-        quote! { #crate_name::resolver_utils::resolve_container_serial(ctx, self).await }
-    } else {
-        quote! { #crate_name::resolver_utils::resolve_container(ctx, self).await }
-    };
+    let (erased_impl, resolve_container, collect_erased) = gen_erased_container(
+        &crate_name,
+        &quote!(#ident #ty_generics),
+        &object_args.generics,
+        object_args.serial,
+    );
 
     let expanded = quote! {
         #[allow(clippy::all, clippy::pedantic)]
-        #boxed_trait
         impl #impl_generics #crate_name::resolver_utils::ContainerType for #ident #ty_generics #where_clause {
+            #collect_erased
+
             async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
                 #flat_resolve_field
                 ::std::result::Result::Ok(::std::option::Option::None)
@@ -157,7 +158,6 @@ pub fn generate(object_args: &args::MergedObject) -> GeneratorResult<TokenStream
         }
 
         #[allow(clippy::all, clippy::pedantic)]
-        #boxed_trait
         impl #impl_generics #crate_name::OutputType for #ident #ty_generics #where_clause {
             fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
                 #gql_typename
@@ -198,10 +198,10 @@ pub fn generate(object_args: &args::MergedObject) -> GeneratorResult<TokenStream
                 })
             }
 
-            async fn resolve(&self, ctx: &#crate_name::ContextSelectionSet<'_>, _field: &#crate_name::Positioned<#crate_name::parser::types::Field>) -> #crate_name::ServerResult<#crate_name::Value> {
-                #resolve_container
-            }
+            #resolve_container
         }
+
+        #erased_impl
 
         impl #impl_generics #crate_name::ObjectType for #ident #ty_generics #where_clause {}
     };

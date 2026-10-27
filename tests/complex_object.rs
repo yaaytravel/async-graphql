@@ -98,6 +98,7 @@ async fn test_complex_object_non_async_resolvers() {
 pub async fn test_complex_object() {
     /// A complex object.
     #[derive(SimpleObject)]
+    #[graphql(getters)]
     #[graphql(complex)]
     struct MyObj {
         a: i32,

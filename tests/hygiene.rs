@@ -29,6 +29,7 @@ impl MyObject {
 }
 
 #[derive(async_graphql::SimpleObject)]
+#[graphql(getters)]
 struct MySimpleObject {
     /// Value.
     #[graphql(owned)]

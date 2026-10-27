@@ -1,5 +1,6 @@
 use std::{
     any::Any,
+    borrow::Cow,
     collections::BTreeMap,
     fmt::{self, Debug, Display, Formatter},
     marker::PhantomData,
@@ -180,6 +181,24 @@ pub struct InputValueError<T> {
     phantom: PhantomData<T>,
 }
 
+/// The message of an input error propagated from type `from` to type `to`.
+/// Not generic, so it is compiled once rather than once per pair of types. The
+/// type names are passed as functions so their bodies are not inlined into
+/// every `propagate` instance either.
+#[inline(never)]
+fn propagated_message(
+    message: String,
+    from: fn() -> Cow<'static, str>,
+    to: fn() -> Cow<'static, str>,
+) -> String {
+    let (from, to) = (from(), to());
+    if from != to {
+        format!(r#"{} (occurred while parsing "{}")"#, message, to)
+    } else {
+        message
+    }
+}
+
 impl<T: InputType> InputValueError<T> {
     fn new(message: String, extensions: Option<ErrorExtensionValues>) -> Self {
         Self {
@@ -192,14 +211,7 @@ impl<T: InputType> InputValueError<T> {
     /// The expected input type did not match the actual input type.
     #[must_use]
     pub fn expected_type(actual: Value) -> Self {
-        Self::new(
-            format!(
-                r#"Expected input type "{}", found {}."#,
-                T::type_name(),
-                actual
-            ),
-            None,
-        )
+        Self::new(expected_type_message(T::type_name, actual), None)
     }
 
     /// A custom error message.
@@ -208,26 +220,19 @@ impl<T: InputType> InputValueError<T> {
     /// you use the `?` operator.
     #[must_use]
     pub fn custom(msg: impl Display) -> Self {
-        Self::new(
-            format!(r#"Failed to parse "{}": {}"#, T::type_name(), msg),
-            None,
-        )
+        Self::new(custom_message(T::type_name, &msg), None)
     }
 
     /// Propagate the error message to a different type.
     pub fn propagate<U: InputType>(self) -> InputValueError<U> {
-        if T::type_name() != U::type_name() {
-            InputValueError::new(
-                format!(
-                    r#"{} (occurred while parsing "{}")"#,
-                    self.message,
-                    U::type_name()
-                ),
-                self.extensions,
-            )
-        } else {
-            InputValueError::new(self.message, self.extensions)
-        }
+        InputValueError::new(
+            propagated_message(
+                self.message,
+                <T as InputType>::type_name,
+                <U as InputType>::type_name,
+            ),
+            self.extensions,
+        )
     }
 
     /// Set an extension value.
@@ -240,10 +245,36 @@ impl<T: InputType> InputValueError<T> {
 
     /// Convert the error into a server error.
     pub fn into_server_error(self, pos: Pos) -> ServerError {
-        let mut err = ServerError::new(self.message, Some(pos));
-        err.extensions = self.extensions;
-        err
+        input_server_error(self.message, self.extensions, pos)
     }
+}
+
+// The bodies of `InputValueError`'s constructors, outside the generic impl so
+// they are compiled once rather than once per input type (and per message type).
+
+#[inline(never)]
+fn expected_type_message(type_name: fn() -> Cow<'static, str>, actual: Value) -> String {
+    format!(
+        r#"Expected input type "{}", found {}."#,
+        type_name(),
+        actual
+    )
+}
+
+#[inline(never)]
+fn custom_message(type_name: fn() -> Cow<'static, str>, msg: &dyn Display) -> String {
+    format!(r#"Failed to parse "{}": {}"#, type_name(), msg)
+}
+
+#[inline(never)]
+fn input_server_error(
+    message: String,
+    extensions: Option<ErrorExtensionValues>,
+    pos: Pos,
+) -> ServerError {
+    let mut err = ServerError::new(message, Some(pos));
+    err.extensions = extensions;
+    err
 }
 
 impl<T: InputType, E: Display> From<E> for InputValueError<T> {

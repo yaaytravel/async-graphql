@@ -12,10 +12,10 @@ use crate::{
     args::{self, RenameRuleExt, RenameTarget, TypeDirectiveLocation},
     output_type::OutputType,
     utils::{
-        GeneratorResult, extract_input_args, gen_boxed_trait, gen_deprecation, gen_directive_calls,
-        generate_default, generate_guards, get_cfg_attrs, get_crate_path, get_rustdoc,
-        get_type_path_and_name, parse_complexity_expr, parse_graphql_attrs, remove_graphql_attrs,
-        visible_fn,
+        GeneratorResult, extract_input_args, gen_deprecation, gen_directive_calls,
+        gen_resolve_field_value, generate_default, generate_guards, get_cfg_attrs, get_crate_path,
+        get_rustdoc, get_type_path_and_name, parse_complexity_expr, parse_graphql_attrs,
+        remove_graphql_attrs, visible_fn,
     },
 };
 
@@ -24,7 +24,6 @@ pub fn generate(
     item_impl: &mut ItemImpl,
 ) -> GeneratorResult<TokenStream> {
     let crate_name = get_crate_path(&object_args.crate_path, object_args.internal);
-    let boxed_trait = gen_boxed_trait(&crate_name);
     let (self_ty, _) = get_type_path_and_name(item_impl.self_ty.as_ref())?;
     let generics = &item_impl.generics;
     let where_clause = &item_impl.generics.where_clause;
@@ -88,14 +87,18 @@ pub fn generate(
                             .into_iter(),
                     );
 
+                    // The base method returns a plain value or a `Result`, as written.
+                    let base_value = quote! {{
+                        use #crate_name::resolver_utils::{FieldReturnResult as _, FieldReturnValue as _};
+                        let value = #self_ty::#base_function_name(&self, #other_atts).await;
+                        (&value).field_return_kind().convert(value)?
+                    }};
                     let new_block = match with {
                         Some(with) => quote!({
-                            ::std::result::Result::Ok(#with(#self_ty::#base_function_name(&self, #other_atts).await?))
+                            ::std::result::Result::Ok(#with(#base_value))
                         }),
                         None => quote!({
-                            {
-                                ::std::result::Result::Ok(#self_ty::#base_function_name(&self, #other_atts).await?.into())
-                            }
+                            ::std::result::Result::Ok(#base_value.into())
                         }),
                     };
 
@@ -339,12 +342,12 @@ pub fn generate(
 
                 schema_args.push(quote! {
                     {
-                        let mut arg = #crate_name::registry::MetaInputValue::new(
-                            ::std::string::ToString::to_string(#name),
+                        let arg = #crate_name::registry::add_input_value(
+                            &mut field.args,
+                            #name,
                             <#ty as #crate_name::InputType>::create_type_info(registry),
                         );
                         #(#arg_sets)*
-                        field.args.insert(::std::string::ToString::to_string(#name), arg);
                     }
                 });
 
@@ -497,28 +500,21 @@ pub fn generate(
             });
 
             let field_ident = &method.sig.ident;
-            if is_async && let OutputType::Value(inner_ty) = &ty {
-                let block = &method.block;
-                let new_block = quote!({
-                    {
-                        ::std::result::Result::Ok(async move {
-                            let value:#inner_ty = #block;
-                            value
-                        }.await)
-                    }
-                });
-                method.block = syn::parse2::<Block>(new_block).expect("invalid block");
-                method.sig.output =
-                    syn::parse2::<ReturnType>(quote! { -> #crate_name::Result<#inner_ty> })
-                        .expect("invalid result type");
-            }
-
+            // A method returning a plain value is called as written and its value wrapped
+            // here, rather than rewriting its body into a nested async block.
             let resolve_obj = if is_async {
-                quote! {
-                    {
-                        let res = self.#field_ident(ctx, #(#use_params),*).await;
-                        res.map_err(|err| ::std::convert::Into::<#crate_name::Error>::into(err).into_server_error(ctx.item.pos))
-                    }
+                match &ty {
+                    OutputType::Value(_) => quote! {
+                        ::std::result::Result::Ok::<_, #crate_name::ServerError>(
+                            self.#field_ident(ctx, #(#use_params),*).await
+                        )
+                    },
+                    OutputType::Result(_) => quote! {
+                        {
+                            let res = self.#field_ident(ctx, #(#use_params),*).await;
+                            res.map_err(|err| ::std::convert::Into::<#crate_name::Error>::into(err).into_server_error(ctx.item.pos))
+                        }
+                    },
                 }
             } else {
                 match &ty {
@@ -547,6 +543,7 @@ pub fn generate(
                 None => None,
             };
 
+            let resolve_value = gen_resolve_field_value(&crate_name, quote!(&obj), true);
             let resolve_block = if is_async {
                 quote! {
                     let f = async move {
@@ -565,7 +562,7 @@ pub fn generate(
                     #(#get_params)*
                     #guard
                     let obj = #resolve_obj.map_err(|err| ctx.set_error_path(err))?;
-                    return #crate_name::resolver_utils::resolve_simple_field_value(ctx, &obj).await;
+                    return #resolve_value;
                 }
             };
 
@@ -584,7 +581,6 @@ pub fn generate(
         #item_impl
 
         #[allow(clippy::all, clippy::pedantic)]
-        #boxed_trait
         impl #generics #crate_name::ComplexObject for #self_ty #where_clause {
             fn fields(registry: &mut #crate_name::registry::Registry) -> ::std::vec::Vec<(::std::string::String, #crate_name::registry::MetaField)> {
                 let mut fields = ::std::vec::Vec::new();

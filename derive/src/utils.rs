@@ -376,12 +376,148 @@ fn extract_directive_call_path(directive: &Expr) -> Option<syn::Path> {
     None
 }
 
-pub fn gen_boxed_trait(crate_name: &syn::Path) -> TokenStream {
-    if cfg!(feature = "boxed-trait") {
-        quote! {
-            #[#crate_name::async_trait::async_trait]
+/// An `OutputType::resolve` for a type whose value is ready without the
+/// selection set or any async work: it returns a ready future instead of being
+/// an `async fn`, so it has no state machine of its own.
+pub fn gen_ready_resolve(crate_name: &syn::Path, value: TokenStream) -> TokenStream {
+    quote! {
+        fn resolve(
+            &self,
+            _: &#crate_name::ContextSelectionSet<'_>,
+            _field: &#crate_name::Positioned<#crate_name::parser::types::Field>,
+        ) -> impl ::std::future::Future<Output = #crate_name::ServerResult<#crate_name::Value>> + ::std::marker::Send {
+            ::std::future::ready(::std::result::Result::Ok(#value))
         }
-    } else {
-        quote! {}
+    }
+}
+
+/// Generates the expression that resolves a field's value with the field's
+/// selection set. It calls `OutputType::resolve` directly rather than a
+/// generic library helper, so no helper is instantiated once per field or
+/// nested once per type along a chain of object types.
+///
+/// `set_error_path` stamps resolution errors with this field's path, as
+/// `resolve_simple_field_value` does for non-async fields.
+pub fn gen_resolve_field_value(
+    crate_name: &syn::Path,
+    value: TokenStream,
+    set_error_path: bool,
+) -> TokenStream {
+    let map_err = set_error_path.then(|| quote!(.map_err(|err| ctx.set_error_path(err))));
+    quote! {
+        #crate_name::OutputType::resolve(
+            #value,
+            &ctx.with_selection_set(&ctx.item.node.selection_set),
+            ctx.item,
+        )
+        .await
+        .map(::std::option::Option::Some)
+        #map_err
+    }
+}
+
+/// Generates an `ErasedContainer` impl for `&Self`, the `OutputType::resolve`
+/// body that resolves through it, and a `ContainerType::collect_all_fields`
+/// that collects through it rather than through the generic default.
+///
+/// Interfaces and unions forward `collect_all_fields` to their variants, so
+/// they do not use the third part.
+///
+/// Because the impl is generated per type, resolving one object type and then
+/// the next one goes through no generic library code. rustc counts the
+/// recursion depth of each generic function separately, so a generic step
+/// shared by every type would otherwise nest once per type along a chain of
+/// object types and hit the recursion limit.
+pub fn gen_erased_container(
+    crate_name: &syn::Path,
+    self_ty: &TokenStream,
+    generics: &syn::Generics,
+    serial: bool,
+) -> (TokenStream, TokenStream, TokenStream) {
+    let mut generics = generics.clone();
+    generics.params.insert(0, parse_quote!('__erased));
+    let (impl_generics, _, where_clause) = generics.split_for_impl();
+    let erased_impl = quote! {
+        #[doc(hidden)]
+        #[allow(clippy::all, clippy::pedantic)]
+        impl #impl_generics #crate_name::resolver_utils::ErasedContainer<'__erased> for &'__erased #self_ty #where_clause {
+            fn erased_resolve_field(
+                &self,
+                ctx: #crate_name::Context<'__erased>,
+                hooks: bool,
+            ) -> #crate_name::resolver_utils::BoxFieldResult<'__erased> {
+                // Both paths start from the field's boxed future, so the hooks
+                // wrapper is one non-generic function shared by every type.
+                if hooks {
+                    let resolve_fut = #crate_name::resolver_utils::ContainerType::resolve_field_boxed(
+                        *self,
+                        ::std::clone::Clone::clone(&ctx),
+                    );
+                    #crate_name::resolver_utils::resolve_boxed_field_with_hooks(
+                        ctx,
+                        <#self_ty as #crate_name::OutputType>::type_name(),
+                        resolve_fut,
+                    )
+                } else {
+                    #crate_name::resolver_utils::ContainerType::resolve_field_boxed(*self, ctx)
+                }
+            }
+
+            fn erased_resolve_field_now(
+                &self,
+                ctx: &#crate_name::Context<'__erased>,
+            ) -> ::std::option::Option<#crate_name::Value> {
+                #crate_name::resolver_utils::ContainerType::resolve_field_now(*self, ctx)
+            }
+
+            fn erased_type_name(&self) -> ::std::borrow::Cow<'static, ::std::primitive::str> {
+                <#self_ty as #crate_name::OutputType>::type_name()
+            }
+
+            fn erased_introspection_type_name(&self) -> ::std::borrow::Cow<'static, ::std::primitive::str> {
+                #crate_name::OutputType::introspection_type_name(*self)
+            }
+
+            fn erased_collect_all_fields(
+                &self,
+                ctx: &#crate_name::ContextSelectionSet<'__erased>,
+                fields: &mut #crate_name::resolver_utils::Fields<'__erased>,
+            ) -> #crate_name::ServerResult<()> {
+                #crate_name::resolver_utils::ContainerType::collect_all_fields(*self, ctx, fields)
+            }
+        }
+    };
+    let parallel = !serial;
+    // Returns the container's future directly: `OutputType::resolve` gives
+    // `self` and the context one lifetime, so no state machine is needed here.
+    let resolve = quote! {
+        fn resolve<'__resolve>(
+            &'__resolve self,
+            ctx: &'__resolve #crate_name::ContextSelectionSet<'__resolve>,
+            _field: &'__resolve #crate_name::Positioned<#crate_name::parser::types::Field>,
+        ) -> impl ::std::future::Future<Output = #crate_name::ServerResult<#crate_name::Value>> + ::std::marker::Send + '__resolve {
+            #crate_name::resolver_utils::resolve_container_dyn(ctx, &self, #parallel)
+        }
+    };
+    let collect_all_fields = quote! {
+        fn collect_all_fields<'__erased>(
+            &'__erased self,
+            ctx: &#crate_name::ContextSelectionSet<'__erased>,
+            fields: &mut #crate_name::resolver_utils::Fields<'__erased>,
+        ) -> #crate_name::ServerResult<()> {
+            fields.add_set_erased(ctx, &self)
+        }
+    };
+    (erased_impl, resolve, collect_all_fields)
+}
+
+/// Whether `ty` is a trait object such as `dyn Trait`, looking through
+/// parentheses and invisible groups.
+pub fn is_trait_object(ty: &Type) -> bool {
+    match ty {
+        Type::TraitObject(_) => true,
+        Type::Paren(paren) => is_trait_object(&paren.elem),
+        Type::Group(group) => is_trait_object(&group.elem),
+        _ => false,
     }
 }

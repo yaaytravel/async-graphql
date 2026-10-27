@@ -35,7 +35,6 @@ tracing = ["dep:tracing", "dep:tracing-futures"]
 dynamic-schema = []
 graphiql = ["dep:askama"]
 raw_value = ["async-graphql-value/raw_value"]
-boxed-trait = ["async-graphql-derive/boxed-trait"]
 
 [[bench]]
 harness = false

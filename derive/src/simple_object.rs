@@ -10,8 +10,9 @@ use crate::{
         self, RenameRuleExt, RenameTarget, Resolvability, SimpleObjectField, TypeDirectiveLocation,
     },
     utils::{
-        GeneratorResult, gen_boxed_trait, gen_deprecation, gen_directive_calls, generate_guards,
-        get_crate_path, get_rustdoc, parse_complexity_expr, visible_fn,
+        GeneratorResult, gen_deprecation, gen_directive_calls, gen_erased_container,
+        gen_resolve_field_value, generate_guards, get_crate_path, get_rustdoc,
+        parse_complexity_expr, visible_fn,
     },
 };
 
@@ -30,7 +31,6 @@ struct SimpleObjectFieldGenerator<'a> {
 
 pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream> {
     let crate_name = get_crate_path(&object_args.crate_path, object_args.internal);
-    let boxed_trait = gen_boxed_trait(&crate_name);
     let ident = &object_args.ident;
     let (impl_generics, ty_generics, where_clause) = object_args.generics.split_for_impl();
     let extends = object_args.extends;
@@ -95,6 +95,9 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
     };
     let mut getters = Vec::new();
     let mut resolvers = Vec::new();
+    let mut now_resolvers = Vec::new();
+    let mut boxed_resolvers = Vec::new();
+    let mut flattened_resolvers = Vec::new();
     let mut schema_fields = Vec::new();
 
     let mut processed_fields: Vec<SimpleObjectFieldGenerator> = vec![];
@@ -304,12 +307,12 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
             }
 
             schema_fields.push(quote! {
-                let mut field = #crate_name::registry::MetaField::new(
-                    ::std::string::ToString::to_string(#field_name),
+                let field = #crate_name::registry::add_field(
+                    &mut fields,
+                    #field_name,
                     <#ty as #crate_name::OutputType>::create_type_info(registry),
                 );
                 #(#field_sets)*
-                fields.insert(::std::string::ToString::to_string(#field_name), field);
             });
         } else {
             schema_fields.push(quote! {
@@ -357,23 +360,56 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
         };
 
         if !field.flatten {
-            getters.push(quote! {
+            // Only on request: the executor never calls getters, and each is a
+            // function for the compiler to check. Interfaces call them on the
+            // types implementing them. A plain function returning a ready
+            // future, called the same way as an `async fn`.
+            if object_args.getters {
+                getters.push(quote! {
                  #[inline]
                  #[allow(missing_docs)]
-                 #vis async fn #ident(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::Result<#ty> {
-                     ::std::result::Result::Ok(#block)
+                 #vis fn #ident(&self, ctx: &#crate_name::Context<'_>) -> ::std::future::Ready<#crate_name::Result<#ty>> {
+                     ::std::future::ready(::std::result::Result::Ok(#block))
                  }
-            });
+                });
+            }
 
+            // A borrowed field is passed as is, so `&T` is resolved as `T`
+            // rather than through the blanket `OutputType for &T`.
+            let value = if owned { quote!(&obj) } else { quote!(obj) };
+            let resolve_value = gen_resolve_field_value(&crate_name, value, true);
+            // A plain borrowed field can skip its future when its type resolves
+            // without one. Guarded, owned and derived fields always take one.
+            if guard.is_none() && !owned && derived.is_none() {
+                now_resolvers.push(quote! {
+                    #field_name => #crate_name::OutputType::resolve_now(&self.#base_ident),
+                });
+            }
             resolvers.push(quote! {
-                if ctx.item.node.name.node == #field_name {
+                #field_name => {
                     #guard
                     let obj: #ty = #block;
-                    return #crate_name::resolver_utils::resolve_simple_field_value(ctx, &obj).await;
+                    return #resolve_value;
+                }
+            });
+            // The boxed resolver shares one future per field type for plain
+            // borrowed fields, and needs its own async block only for the rest.
+            boxed_resolvers.push(if guard.is_none() && !owned && derived.is_none() {
+                quote! {
+                    #field_name => #crate_name::resolver_utils::resolve_field_value(&self.#base_ident, ctx),
+                }
+            } else {
+                quote! {
+                    #field_name => ::std::boxed::Box::pin(async move {
+                        let ctx = &ctx;
+                        #guard
+                        let obj: #ty = #block;
+                        return #resolve_value;
+                    }),
                 }
             });
         } else {
-            resolvers.push(quote! {
+            flattened_resolvers.push(quote! {
                 if let ::std::option::Option::Some(value) = #crate_name::ContainerType::resolve_field(&self.#ident, ctx).await? {
                     return ::std::result::Result::Ok(std::option::Option::Some(value));
                 }
@@ -381,7 +417,7 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
         }
     }
 
-    if !object_args.fake && resolvers.is_empty() {
+    if !object_args.fake && resolvers.is_empty() && flattened_resolvers.is_empty() {
         return Err(Error::new_spanned(
             ident,
             "A GraphQL Object type must define one or more fields.",
@@ -505,11 +541,83 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
         };
     }
 
+    let resolve_field_now = if now_resolvers.is_empty() {
+        quote!()
+    } else {
+        quote! {
+            fn resolve_field_now(&self, ctx: &#crate_name::Context<'_>) -> ::std::option::Option<#crate_name::Value> {
+                match ctx.item.node.name.node.as_str() {
+                    #(#now_resolvers)*
+                    _ => ::std::option::Option::None,
+                }
+            }
+        }
+    };
+
+    // Fields resolve through `resolve_field_boxed`, a plain function returning
+    // each field's boxed future, rather than through one `async fn` per type
+    // holding every field's future in its state machine.
+    let fallback = if flattened_resolvers.is_empty() && !object_args.complex {
+        quote!(::std::boxed::Box::pin(::std::future::ready(
+            ::std::result::Result::Ok(::std::option::Option::None)
+        )))
+    } else {
+        quote! {
+            ::std::boxed::Box::pin(async move {
+                let ctx = &ctx;
+                #(#flattened_resolvers)*
+                #complex_resolver
+                ::std::result::Result::Ok(::std::option::Option::None)
+            })
+        }
+    };
+    // Only hooks and code outside the executor call `resolve_field` itself.
+    let resolve_field_from_boxed = quote! {
+        fn resolve_field<'__field>(
+            &'__field self,
+            ctx: &'__field #crate_name::Context<'__field>,
+        ) -> impl ::std::future::Future<Output = #crate_name::ServerResult<::std::option::Option<#crate_name::Value>>> + ::std::marker::Send + '__field {
+            #crate_name::resolver_utils::ContainerType::resolve_field_boxed(self, ::std::clone::Clone::clone(ctx))
+        }
+    };
+    let resolve_field_boxed = quote! {
+        fn resolve_field_boxed<'__field>(
+            &'__field self,
+            ctx: #crate_name::Context<'__field>,
+        ) -> #crate_name::resolver_utils::BoxFieldResult<'__field> {
+            let item = ctx.item;
+            match item.node.name.node.as_str() {
+                #(#boxed_resolvers)*
+                _ => #fallback,
+            }
+        }
+
+        #resolve_field_from_boxed
+    };
+
+    let field_match = if resolvers.is_empty() {
+        quote!()
+    } else {
+        quote! {
+            match ctx.item.node.name.node.as_str() {
+                #(#resolvers)*
+                _ => {}
+            }
+        }
+    };
+
     let resolve_container = if object_args.serial {
         quote! { #crate_name::resolver_utils::resolve_container_serial(ctx, self).await }
     } else {
         quote! { #crate_name::resolver_utils::resolve_container(ctx, self).await }
     };
+
+    let (erased_impl, resolve_erased, collect_erased) = gen_erased_container(
+        &crate_name,
+        &quote!(#ident #ty_generics),
+        &object_args.generics,
+        object_args.serial,
+    );
 
     let expanded = if object_args.concretes.is_empty() {
         quote! {
@@ -519,17 +627,14 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
             }
 
             #[allow(clippy::all, clippy::pedantic)]
-            #boxed_trait
             impl #impl_generics #crate_name::resolver_utils::ContainerType for #ident #ty_generics #where_clause {
-                async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
-                    #(#resolvers)*
-                    #complex_resolver
-                    ::std::result::Result::Ok(::std::option::Option::None)
-                }
+                #collect_erased
+                #resolve_field_now
+
+                #resolve_field_boxed
             }
 
             #[allow(clippy::all, clippy::pedantic)]
-            #boxed_trait
             impl #impl_generics #crate_name::OutputType for #ident #ty_generics #where_clause {
                 fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
                     #gql_typename
@@ -551,10 +656,10 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
                     })
                 }
 
-                async fn resolve(&self, ctx: &#crate_name::ContextSelectionSet<'_>, _field: &#crate_name::Positioned<#crate_name::parser::types::Field>) -> #crate_name::ServerResult<#crate_name::Value> {
-                    #resolve_container
-                }
+                #resolve_erased
             }
+
+            #erased_impl
 
             impl #impl_generics #crate_name::ObjectType for #ident #ty_generics #where_clause {}
         }
@@ -607,7 +712,8 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
                 }
 
                 async fn __internal_resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> where Self: #crate_name::ContainerType {
-                    #(#resolvers)*
+                    #field_match
+                    #(#flattened_resolvers)*
                     ::std::result::Result::Ok(::std::option::Option::None)
                 }
             }
@@ -630,7 +736,6 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
 
             let expanded = quote! {
                 #[allow(clippy::all, clippy::pedantic)]
-                #boxed_trait
                 impl #def_bounds #crate_name::resolver_utils::ContainerType for #concrete_type {
                     async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
                         #complex_resolver
@@ -639,7 +744,6 @@ pub fn generate(object_args: &args::SimpleObject) -> GeneratorResult<TokenStream
                 }
 
                 #[allow(clippy::all, clippy::pedantic)]
-                #boxed_trait
                 impl #def_bounds #crate_name::OutputType for #concrete_type {
                     fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
                         ::std::borrow::Cow::Borrowed(#gql_typename)

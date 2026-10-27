@@ -9,13 +9,13 @@ use syn::{Error, LifetimeParam, Type, visit::Visit, visit_mut::VisitMut};
 use crate::{
     args::{self, RenameTarget},
     utils::{
-        GeneratorResult, RemoveLifetime, gen_boxed_trait, get_crate_path, get_rustdoc, visible_fn,
+        GeneratorResult, RemoveLifetime, gen_erased_container, get_crate_path, get_rustdoc,
+        visible_fn,
     },
 };
 
 pub fn generate(union_args: &args::Union) -> GeneratorResult<TokenStream> {
     let crate_name = get_crate_path(&union_args.crate_path, union_args.internal);
-    let boxed_trait = gen_boxed_trait(&crate_name);
     let ident = &union_args.ident;
     let type_params = union_args.generics.type_params().collect::<Vec<_>>();
     let (impl_generics, ty_generics, where_clause) = union_args.generics.split_for_impl();
@@ -205,6 +205,12 @@ pub fn generate(union_args: &args::Union) -> GeneratorResult<TokenStream> {
     };
 
     let expanded = if union_args.concretes.is_empty() {
+        let (erased_impl, resolve_erased, _) = gen_erased_container(
+            &crate_name,
+            &quote!(#ident #ty_generics),
+            &union_args.generics,
+            false,
+        );
         let get_introspection_typename = get_introspection_typename(lazy_types.clone());
         let registry_types = registry_types(lazy_types.clone());
         let possible_types = possible_types(lazy_types.clone());
@@ -213,7 +219,6 @@ pub fn generate(union_args: &args::Union) -> GeneratorResult<TokenStream> {
             #(#type_into_impls)*
 
             #[allow(clippy::all, clippy::pedantic)]
-            #boxed_trait
             impl #impl_generics #crate_name::resolver_utils::ContainerType for #ident #ty_generics #where_clause {
                 async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
                     ::std::result::Result::Ok(::std::option::Option::None)
@@ -227,7 +232,6 @@ pub fn generate(union_args: &args::Union) -> GeneratorResult<TokenStream> {
             }
 
             #[allow(clippy::all, clippy::pedantic)]
-            #boxed_trait
             impl #impl_generics #crate_name::OutputType for #ident #ty_generics #where_clause {
                 fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
                     #gql_typename
@@ -260,10 +264,10 @@ pub fn generate(union_args: &args::Union) -> GeneratorResult<TokenStream> {
                     })
                 }
 
-                async fn resolve(&self, ctx: &#crate_name::ContextSelectionSet<'_>, _field: &#crate_name::Positioned<#crate_name::parser::types::Field>) -> #crate_name::ServerResult<#crate_name::Value> {
-                    #crate_name::resolver_utils::resolve_container(ctx, self).await
-                }
+                #resolve_erased
             }
+
+            #erased_impl
 
             impl #impl_generics #crate_name::UnionType for #ident #ty_generics #where_clause {}
         }
@@ -363,7 +367,6 @@ pub fn generate(union_args: &args::Union) -> GeneratorResult<TokenStream> {
 
             let expanded = quote! {
                 #[allow(clippy::all, clippy::pedantic)]
-                #boxed_trait
                 impl #def_bounds #crate_name::resolver_utils::ContainerType for #concrete_type {
                     async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
                         ::std::result::Result::Ok(::std::option::Option::None)
@@ -377,7 +380,6 @@ pub fn generate(union_args: &args::Union) -> GeneratorResult<TokenStream> {
                 }
 
                 #[allow(clippy::all, clippy::pedantic)]
-                #boxed_trait
                 impl #def_bounds #crate_name::OutputType for #concrete_type {
                     fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
                         ::std::borrow::Cow::Borrowed(#gql_typename)

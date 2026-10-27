@@ -1,4 +1,6 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, future::Future};
+
+use futures_util::{FutureExt, future::Either};
 
 use crate::{
     ContextSelectionSet, InputType, InputValueError, InputValueResult, OutputType, Positioned,
@@ -45,7 +47,6 @@ impl<T: InputType> InputType for Option<T> {
     }
 }
 
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 impl<T: OutputType + Sync> OutputType for Option<T> {
     fn type_name() -> Cow<'static, str> {
         T::type_name()
@@ -60,23 +61,38 @@ impl<T: OutputType + Sync> OutputType for Option<T> {
         T::type_name().to_string()
     }
 
-    async fn resolve(
-        &self,
-        ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
-    ) -> ServerResult<Value> {
-        if let Some(inner) = self {
-            match OutputType::resolve(inner, ctx, field).await {
-                Ok(value) => Ok(value),
-                Err(err) => {
-                    ctx.add_error(err);
-                    Ok(Value::Null)
-                }
-            }
-        } else {
-            Ok(Value::Null)
+    fn resolve_now(&self) -> Option<Value> {
+        match self {
+            Some(inner) => inner.resolve_now(),
+            None => Some(Value::Null),
         }
     }
+
+    // A combinator rather than an `async fn`, so `Option<T>` adds no state
+    // machine of its own around `T`'s future.
+    fn resolve<'a>(
+        &'a self,
+        ctx: &'a ContextSelectionSet<'a>,
+        field: &'a Positioned<Field>,
+    ) -> impl Future<Output = ServerResult<Value>> + Send + 'a {
+        match self {
+            Some(inner) => Either::Left(
+                OutputType::resolve(inner, ctx, field)
+                    .map(move |result| Ok(null_on_error(ctx, result))),
+            ),
+            None => Either::Right(std::future::ready(Ok(Value::Null))),
+        }
+    }
+}
+
+/// A nullable field's value: an error is recorded on the request and becomes
+/// `null`. Not generic, so it is compiled once rather than once per type.
+#[inline(never)]
+fn null_on_error(ctx: &ContextSelectionSet<'_>, result: ServerResult<Value>) -> Value {
+    result.unwrap_or_else(|err| {
+        ctx.add_error(err);
+        Value::Null
+    })
 }
 
 #[cfg(test)]

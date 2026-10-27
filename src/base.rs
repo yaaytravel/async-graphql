@@ -1,5 +1,6 @@
-#[cfg(not(feature = "boxed-trait"))]
 use std::future::Future;
+
+use futures_util::future::Either;
 use std::{
     borrow::Cow,
     sync::{Arc, Weak},
@@ -65,7 +66,6 @@ pub trait InputType: Send + Sync + Sized {
 }
 
 /// Represents a GraphQL output type.
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 pub trait OutputType: Send + Sync {
     /// Type the name.
     fn type_name() -> Cow<'static, str>;
@@ -86,24 +86,27 @@ pub trait OutputType: Send + Sync {
     /// Create type information in the registry and return qualified typename.
     fn create_type_info(registry: &mut registry::Registry) -> String;
 
-    /// Resolve an output value to `async_graphql::Value`.
-    #[cfg(feature = "boxed-trait")]
-    async fn resolve(
-        &self,
-        ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
-    ) -> ServerResult<Value>;
+    /// Returns the value directly when resolving it needs neither the selection
+    /// set nor any async work, as for scalars and enums. Lists use this to skip
+    /// creating a future for each item.
+    #[doc(hidden)]
+    fn resolve_now(&self) -> Option<Value> {
+        None
+    }
 
     /// Resolve an output value to `async_graphql::Value`.
-    #[cfg(not(feature = "boxed-trait"))]
-    fn resolve(
-        &self,
-        ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
-    ) -> impl Future<Output = ServerResult<Value>> + Send;
+    ///
+    /// The value, the context and the field share one lifetime, so an
+    /// implementation can return another value's future directly instead of
+    /// wrapping it in a state machine of its own. An `async fn` with separate
+    /// lifetimes still implements it.
+    fn resolve<'a>(
+        &'a self,
+        ctx: &'a ContextSelectionSet<'a>,
+        field: &'a Positioned<Field>,
+    ) -> impl Future<Output = ServerResult<Value>> + Send + 'a;
 }
 
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 impl<T: OutputType + ?Sized> OutputType for &T {
     fn type_name() -> Cow<'static, str> {
         T::type_name()
@@ -113,17 +116,21 @@ impl<T: OutputType + ?Sized> OutputType for &T {
         T::create_type_info(registry)
     }
 
+    fn resolve_now(&self) -> Option<Value> {
+        T::resolve_now(*self)
+    }
+
+    // Returns the inner future rather than wrapping it in another state machine.
     #[allow(clippy::trivially_copy_pass_by_ref)]
-    async fn resolve(
-        &self,
-        ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
-    ) -> ServerResult<Value> {
-        T::resolve(*self, ctx, field).await
+    fn resolve<'a>(
+        &'a self,
+        ctx: &'a ContextSelectionSet<'a>,
+        field: &'a Positioned<Field>,
+    ) -> impl Future<Output = ServerResult<Value>> + Send + 'a {
+        T::resolve(*self, ctx, field)
     }
 }
 
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 impl<T: OutputType + Sync, E: Into<Error> + Send + Sync + Clone> OutputType for Result<T, E> {
     fn type_name() -> Cow<'static, str> {
         T::type_name()
@@ -133,14 +140,21 @@ impl<T: OutputType + Sync, E: Into<Error> + Send + Sync + Clone> OutputType for 
         T::create_type_info(registry)
     }
 
-    async fn resolve(
-        &self,
-        ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
-    ) -> ServerResult<Value> {
+    fn resolve_now(&self) -> Option<Value> {
+        // An error goes through `resolve`, which sets its path and position.
+        self.as_ref().ok().and_then(T::resolve_now)
+    }
+
+    fn resolve<'a>(
+        &'a self,
+        ctx: &'a ContextSelectionSet<'a>,
+        field: &'a Positioned<Field>,
+    ) -> impl Future<Output = ServerResult<Value>> + Send + 'a {
         match self {
-            Ok(value) => value.resolve(ctx, field).await,
-            Err(err) => Err(ctx.set_error_path(err.clone().into().into_server_error(field.pos))),
+            Ok(value) => Either::Left(value.resolve(ctx, field)),
+            Err(err) => Either::Right(std::future::ready(Err(
+                ctx.set_error_path(err.clone().into().into_server_error(field.pos))
+            ))),
         }
     }
 }
@@ -166,7 +180,6 @@ pub trait InputObjectType: InputType {}
 /// A GraphQL oneof input object.
 pub trait OneofObjectType: InputObjectType {}
 
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 impl<T: OutputType + ?Sized> OutputType for Box<T> {
     fn type_name() -> Cow<'static, str> {
         T::type_name()
@@ -176,22 +189,16 @@ impl<T: OutputType + ?Sized> OutputType for Box<T> {
         T::create_type_info(registry)
     }
 
-    #[cfg(feature = "boxed-trait")]
-    async fn resolve(
-        &self,
-        ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
-    ) -> ServerResult<Value> {
-        T::resolve(self.as_ref(), ctx, field).await
+    fn resolve_now(&self) -> Option<Value> {
+        T::resolve_now(self.as_ref())
     }
 
     #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[cfg(not(feature = "boxed-trait"))]
-    fn resolve(
-        &self,
-        ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
-    ) -> impl Future<Output = ServerResult<Value>> + Send {
+    fn resolve<'a>(
+        &'a self,
+        ctx: &'a ContextSelectionSet<'a>,
+        field: &'a Positioned<Field>,
+    ) -> impl Future<Output = ServerResult<Value>> + Send + 'a {
         T::resolve(self.as_ref(), ctx, field)
     }
 }
@@ -222,7 +229,6 @@ impl<T: InputType> InputType for Box<T> {
     }
 }
 
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 impl<T: OutputType + ?Sized> OutputType for Arc<T> {
     fn type_name() -> Cow<'static, str> {
         T::type_name()
@@ -232,13 +238,18 @@ impl<T: OutputType + ?Sized> OutputType for Arc<T> {
         T::create_type_info(registry)
     }
 
+    fn resolve_now(&self) -> Option<Value> {
+        T::resolve_now(&**self)
+    }
+
+    // Returns the inner future rather than wrapping it in another state machine.
     #[allow(clippy::trivially_copy_pass_by_ref)]
-    async fn resolve(
-        &self,
-        ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
-    ) -> ServerResult<Value> {
-        T::resolve(&**self, ctx, field).await
+    fn resolve<'a>(
+        &'a self,
+        ctx: &'a ContextSelectionSet<'a>,
+        field: &'a Positioned<Field>,
+    ) -> impl Future<Output = ServerResult<Value>> + Send + 'a {
+        T::resolve(&**self, ctx, field)
     }
 }
 
@@ -268,7 +279,6 @@ impl<T: InputType> InputType for Arc<T> {
     }
 }
 
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 impl<T: OutputType + ?Sized> OutputType for Weak<T> {
     fn type_name() -> Cow<'static, str> {
         <Option<Arc<T>> as OutputType>::type_name()
@@ -288,14 +298,9 @@ impl<T: OutputType + ?Sized> OutputType for Weak<T> {
 }
 
 #[doc(hidden)]
-#[cfg_attr(feature = "boxed-trait", async_trait::async_trait)]
 pub trait ComplexObject {
     fn fields(registry: &mut registry::Registry) -> Vec<(String, registry::MetaField)>;
 
-    #[cfg(feature = "boxed-trait")]
-    async fn resolve_field(&self, ctx: &Context<'_>) -> ServerResult<Option<Value>>;
-
-    #[cfg(not(feature = "boxed-trait"))]
     fn resolve_field(
         &self,
         ctx: &Context<'_>,

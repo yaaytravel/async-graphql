@@ -4,6 +4,8 @@
 
 `Async-graphql`自动实现了对象到接口的转换，把一个对象类型转换为接口类型只需要调用`Into::into`。
 
+实现接口的`SimpleObject`需要加上`#[graphql(getters)]`，为每个字段生成接口所调用的方法。
+
 接口字段的`name`属性表示转发的 Resolver 函数，并且它将被转换为驼峰命名作为字段名称。
 如果你需要自定义 GraphQL 接口字段名称，可以同时使用`name`和`method`属性。
 
@@ -84,6 +86,7 @@ enum MyInterface {
 }
 
 #[derive(SimpleObject)]
+#[graphql(getters)]
 struct MyObject {
     name: String,
 }
@@ -109,6 +112,7 @@ type MySchema = Schema<Query, EmptyMutation, EmptySubscription>;
 # #[graphql(field(name = "name", ty = "String"))]
 # enum MyInterface { MyObject(MyObject) }
 # #[derive(SimpleObject)]
+# #[graphql(getters)]
 # struct MyObject { name: String, }
 # struct Query;
 # #[Object]

@@ -6,14 +6,13 @@ use syn::{Error, ext::IdentExt};
 use crate::{
     args::{self, RenameRuleExt, RenameTarget, TypeDirectiveLocation},
     utils::{
-        GeneratorResult, gen_boxed_trait, gen_deprecation, gen_directive_calls, get_crate_path,
-        get_rustdoc, visible_fn,
+        GeneratorResult, gen_directive_calls, gen_ready_resolve, get_crate_path, get_rustdoc,
+        visible_fn,
     },
 };
 
 pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
     let crate_name = get_crate_path(&enum_args.crate_path, enum_args.internal);
-    let boxed_trait = gen_boxed_trait(&crate_name);
     let ident = &enum_args.ident;
     let e = match &enum_args.data {
         Data::Enum(e) => e,
@@ -63,6 +62,7 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
     let mut enum_names = Vec::new();
     let mut items = Vec::new();
     let mut schema_enum_items = Vec::new();
+    let mut schema_enum_directives = Vec::new();
 
     for variant in e {
         if !variant.fields.is_empty() {
@@ -83,17 +83,11 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
                 .rename(variant.ident.unraw().to_string(), RenameTarget::EnumItem)
         });
         let inaccessible = variant.inaccessible;
-        let tags = variant
-            .tags
-            .iter()
-            .map(|tag| quote!(::std::string::ToString::to_string(#tag)))
-            .collect::<Vec<_>>();
         let directives = gen_directive_calls(
             &crate_name,
             &variant.directives,
             TypeDirectiveLocation::EnumValue,
         );
-        let item_deprecation = gen_deprecation(&variant.deprecation, &crate_name);
         let item_desc = get_rustdoc(&variant.attrs)?;
 
         enum_items.push(item_ident);
@@ -106,44 +100,36 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
         });
 
         let visible = visible_fn(&variant.visible);
-        let has_desc = item_desc.is_some();
-        let has_deprecation = !matches!(variant.deprecation, args::Deprecation::NoDeprecated);
-        let has_visible = !matches!(variant.visible, None | Some(args::Visible::None));
-        let has_tags = !variant.tags.is_empty();
-        let has_directives = !variant.directives.is_empty();
-
-        let mut value_sets = Vec::new();
-        if has_desc {
-            let desc = item_desc.as_ref().expect("checked desc");
-            value_sets.push(quote! {
-                value.description = ::std::option::Option::Some(::std::string::ToString::to_string(#desc));
-            });
-        }
-        if has_deprecation {
-            value_sets.push(quote!(value.deprecation = #item_deprecation;));
-        }
-        if has_visible {
-            value_sets.push(quote!(value.visible = #visible;));
-        }
-        if inaccessible {
-            value_sets.push(quote!(value.inaccessible = true;));
-        }
-        if has_tags {
-            value_sets.push(quote!(value.tags = ::std::vec![ #(#tags),* ];));
-        }
-        if has_directives {
-            value_sets.push(quote!(value.directive_invocations = ::std::vec![ #(#directives),* ];));
-        }
+        let description = match &item_desc {
+            Some(desc) => quote!(::std::option::Option::Some(#desc)),
+            None => quote!(::std::option::Option::None),
+        };
+        let deprecation = match &variant.deprecation {
+            args::Deprecation::NoDeprecated => quote!(::std::option::Option::None),
+            args::Deprecation::Deprecated { reason: None } => {
+                quote!(::std::option::Option::Some(::std::option::Option::None))
+            }
+            args::Deprecation::Deprecated {
+                reason: Some(reason),
+            } => quote!(::std::option::Option::Some(::std::option::Option::Some(#reason))),
+        };
+        let tags = &variant.tags;
 
         schema_enum_items.push(quote! {
-            {
-                let mut value = #crate_name::registry::MetaEnumValue::new(
-                    ::std::string::ToString::to_string(#gql_item_name),
-                );
-                #(#value_sets)*
-                enum_items.insert(::std::string::ToString::to_string(#gql_item_name), value);
+            #crate_name::registry::EnumValueDef {
+                name: #gql_item_name,
+                description: #description,
+                deprecation: #deprecation,
+                visible: #visible,
+                inaccessible: #inaccessible,
+                tags: &[ #(#tags),* ],
             }
         });
+        if !variant.directives.is_empty() {
+            schema_enum_directives.push(quote! {
+                enum_items[#gql_item_name].directive_invocations = ::std::vec![ #(#directives),* ];
+            });
+        }
     }
 
     let remote_conversion = if let Some(remote_ty) = &enum_args.remote {
@@ -233,6 +219,10 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
     if has_requires_scopes {
         enum_builder_calls.push(quote!(.requires_scopes(::std::vec![ #(#requires_scopes),* ])));
     }
+    let resolve = gen_ready_resolve(
+        &crate_name,
+        quote!(#crate_name::resolver_utils::enum_name_value(self.__gql_name())),
+    );
     let expanded = quote! {
         #[allow(clippy::all, clippy::pedantic)]
         impl #crate_name::resolver_utils::EnumType for #ident {
@@ -243,6 +233,30 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
 
         #[allow(clippy::all, clippy::pedantic)]
         impl #ident {
+            // Matches rather than searching `EnumType::items`, so no generic
+            // search is compiled per enum.
+            fn __gql_name(self) -> &'static ::std::primitive::str {
+                match self {
+                    #(#ident::#enum_items => #enum_names,)*
+                }
+            }
+
+            fn __parse_gql(value: #crate_name::Value) -> #crate_name::InputValueResult<Self> {
+                match #crate_name::resolver_utils::enum_name_of(&value) {
+                    #[allow(unreachable_patterns)]
+                    ::std::option::Option::Some(name) => match name {
+                        #(#enum_names => ::std::result::Result::Ok(#ident::#enum_items),)*
+                        _ => ::std::result::Result::Err(#crate_name::InputValueError::custom(::std::format_args!(
+                            r#"Enumeration type does not contain value "{}"."#,
+                            name,
+                        ))),
+                    },
+                    ::std::option::Option::None => {
+                        ::std::result::Result::Err(#crate_name::InputValueError::expected_type(value))
+                    }
+                }
+            }
+
             fn __type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
                 #gql_typename
             }
@@ -252,8 +266,9 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
                     #crate_name::registry::EnumBuilder::new(
                         #gql_typename_string,
                         {
-                            let mut enum_items = #crate_name::indexmap::IndexMap::new();
-                            #(#schema_enum_items)*
+                            #[allow(unused_mut)]
+                            let mut enum_items = #crate_name::registry::enum_values(&[ #(#schema_enum_items),* ]);
+                            #(#schema_enum_directives)*
                             enum_items
                         },
                     )
@@ -276,11 +291,11 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
             }
 
             fn parse(value: ::std::option::Option<#crate_name::Value>) -> #crate_name::InputValueResult<Self> {
-                #crate_name::resolver_utils::parse_enum(value.unwrap_or_default())
+                Self::__parse_gql(value.unwrap_or_default())
             }
 
             fn to_value(&self) -> #crate_name::Value {
-                #crate_name::resolver_utils::enum_value(*self)
+                #crate_name::resolver_utils::enum_name_value(self.__gql_name())
             }
 
             fn as_raw_value(&self) -> ::std::option::Option<&Self::RawValueType> {
@@ -288,7 +303,6 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
             }
         }
 
-        #boxed_trait
         impl #crate_name::OutputType for #ident {
             fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
                 Self::__type_name()
@@ -298,14 +312,16 @@ pub fn generate(enum_args: &args::Enum) -> GeneratorResult<TokenStream> {
                 Self::__create_type_info(registry)
             }
 
-            async fn resolve(&self, _: &#crate_name::ContextSelectionSet<'_>, _field: &#crate_name::Positioned<#crate_name::parser::types::Field>) -> #crate_name::ServerResult<#crate_name::Value> {
-                ::std::result::Result::Ok(#crate_name::resolver_utils::enum_value(*self))
+            fn resolve_now(&self) -> ::std::option::Option<#crate_name::Value> {
+                ::std::option::Option::Some(#crate_name::resolver_utils::enum_name_value(self.__gql_name()))
             }
+
+            #resolve
         }
 
         impl ::std::convert::From<#ident> for #crate_name::Value {
             fn from(value: #ident) -> #crate_name::Value {
-                #crate_name::resolver_utils::enum_value(value)
+                #crate_name::resolver_utils::enum_name_value(value.__gql_name())
             }
         }
 

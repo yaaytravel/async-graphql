@@ -261,6 +261,32 @@ pub struct MetaField {
     pub requires_scopes: Vec<String>,
 }
 
+/// Inserts a field into a type's field map and returns it for further setup.
+///
+/// The derive macros call this instead of building and moving a `MetaField`
+/// in generated code, which keeps the code generated per field small.
+#[doc(hidden)]
+pub fn add_field<'a>(
+    fields: &'a mut IndexMap<String, MetaField>,
+    name: &str,
+    ty: String,
+) -> &'a mut MetaField {
+    let (index, _) = fields.insert_full(name.to_string(), MetaField::new(name, ty));
+    &mut fields[index]
+}
+
+/// Inserts an argument or input field into its map and returns it for further
+/// setup. See [`add_field`].
+#[doc(hidden)]
+pub fn add_input_value<'a>(
+    values: &'a mut IndexMap<String, MetaInputValue>,
+    name: &str,
+    ty: String,
+) -> &'a mut MetaInputValue {
+    let (index, _) = values.insert_full(name.to_string(), MetaInputValue::new(name, ty));
+    &mut values[index]
+}
+
 impl MetaField {
     pub fn new(name: impl Into<String>, ty: impl Into<String>) -> Self {
         Self {
@@ -311,6 +337,62 @@ impl MetaEnumValue {
 }
 
 type MetaVisibleFn = fn(&Context<'_>) -> bool;
+
+/// An enum value as the `Enum` derive macro describes it, built into a
+/// [`MetaEnumValue`] by [`enum_values`]. Keeps the code generated per value to
+/// a table row rather than string allocations and their cleanup.
+#[doc(hidden)]
+pub struct EnumValueDef {
+    pub name: &'static str,
+    pub description: Option<&'static str>,
+    /// `None` when not deprecated, otherwise the optional reason.
+    pub deprecation: Option<Option<&'static str>>,
+    pub visible: Option<fn(&Context<'_>) -> bool>,
+    pub inaccessible: bool,
+    pub tags: &'static [&'static str],
+}
+
+/// Builds an enum's values from their [`EnumValueDef`]s.
+#[doc(hidden)]
+pub fn enum_values(defs: &[EnumValueDef]) -> IndexMap<String, MetaEnumValue> {
+    defs.iter()
+        .map(|def| {
+            let value = MetaEnumValue {
+                name: def.name.to_string(),
+                description: def.description.map(str::to_string),
+                deprecation: match def.deprecation {
+                    None => Deprecation::NoDeprecated,
+                    Some(reason) => Deprecation::Deprecated {
+                        reason: reason.map(str::to_string),
+                    },
+                },
+                visible: def.visible,
+                inaccessible: def.inaccessible,
+                tags: def.tags.iter().map(ToString::to_string).collect(),
+                directive_invocations: Vec::new(),
+            };
+            (def.name.to_string(), value)
+        })
+        .collect()
+}
+
+/// An input object field's name and its type's `federation_fields` function.
+#[doc(hidden)]
+pub type InputFederationField<'a> = (&'a str, fn() -> Option<String>);
+
+/// An input object's federation field set, from each field's name and its
+/// type's own field set. Shared by every `InputObject` derive.
+#[doc(hidden)]
+pub fn input_federation_fields(fields: &[InputFederationField<'_>]) -> Option<String> {
+    let fields = fields
+        .iter()
+        .map(|(name, nested)| match nested() {
+            Some(nested) => format!("{} {}", name, nested),
+            None => name.to_string(),
+        })
+        .collect::<Vec<_>>();
+    Some(format!("{{ {} }}", fields.join(" ")))
+}
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum MetaTypeId {
@@ -1372,9 +1454,9 @@ impl Registry {
         T::qualified_type_name()
     }
 
-    fn create_type<F: FnMut(&mut Registry) -> MetaType>(
+    fn create_type(
         &mut self,
-        f: &mut F,
+        f: &mut dyn FnMut(&mut Registry) -> MetaType,
         name: &str,
         rust_typename: &'static str,
         type_id: MetaTypeId,

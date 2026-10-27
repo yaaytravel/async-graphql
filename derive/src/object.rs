@@ -12,10 +12,10 @@ use crate::{
     args::{self, RenameRuleExt, RenameTarget, Resolvability, TypeDirectiveLocation},
     output_type::OutputType,
     utils::{
-        GeneratorResult, extract_input_args, gen_boxed_trait, gen_deprecation, gen_directive_calls,
-        generate_default, generate_guards, get_cfg_attrs, get_crate_path, get_rustdoc,
-        get_type_path_and_name, parse_complexity_expr, parse_graphql_attrs, remove_graphql_attrs,
-        visible_fn,
+        GeneratorResult, extract_input_args, gen_deprecation, gen_directive_calls,
+        gen_erased_container, gen_resolve_field_value, generate_default, generate_guards,
+        get_cfg_attrs, get_crate_path, get_rustdoc, get_type_path_and_name, is_trait_object,
+        parse_complexity_expr, parse_graphql_attrs, remove_graphql_attrs, visible_fn,
     },
     validators::Validators,
 };
@@ -25,7 +25,6 @@ pub fn generate(
     item_impl: &mut ItemImpl,
 ) -> GeneratorResult<TokenStream> {
     let crate_name = get_crate_path(&object_args.crate_path, object_args.internal);
-    let boxed_trait = gen_boxed_trait(&crate_name);
     let (self_ty, self_name) = get_type_path_and_name(item_impl.self_ty.as_ref())?;
     let (impl_generics, _, where_clause) = item_impl.generics.split_for_impl();
     let extends = object_args.extends;
@@ -147,14 +146,18 @@ pub fn generate(
                             .into_iter(),
                     );
 
+                    // The base method returns a plain value or a `Result`, as written.
+                    let base_value = quote! {{
+                        use #crate_name::resolver_utils::{FieldReturnResult as _, FieldReturnValue as _};
+                        let value = #self_ty::#base_function_name(&self, #other_atts).await;
+                        (&value).field_return_kind().convert(value)?
+                    }};
                     let new_block = match with {
                         Some(with) => quote!({
-                            ::std::result::Result::Ok(#with(#self_ty::#base_function_name(&self, #other_atts).await?))
+                            ::std::result::Result::Ok(#with(#base_value))
                         }),
                         None => quote!({
-                            {
-                                ::std::result::Result::Ok(#self_ty::#base_function_name(&self, #other_atts).await?.into())
-                            }
+                            ::std::result::Result::Ok(#base_value.into())
                         }),
                     };
 
@@ -257,23 +260,19 @@ pub fn generate(
                 );
 
                 let field_ident = &method.sig.ident;
-                if let OutputType::Value(inner_ty) = &ty {
-                    let block = &method.block;
-                    let new_block = quote!({
-                        {
-                            let value:#inner_ty = async move #block.await;
-                            ::std::result::Result::Ok(value)
-                        }
-                    });
-                    method.block = syn::parse2::<Block>(new_block).expect("invalid block");
-                    method.sig.output =
-                        syn::parse2::<ReturnType>(quote! { -> #crate_name::Result<#inner_ty> })
-                            .expect("invalid result type");
-                }
-                let do_find = quote! {
-                    self.#field_ident(ctx, #(#use_keys),*)
-                        .await.map_err(|err| ::std::convert::Into::<#crate_name::Error>::into(err)
-                        .into_server_error(ctx.item.pos))
+                // A method returning a plain value is called as written and its value
+                // wrapped here, rather than rewriting its body into a nested async block.
+                let do_find = match &ty {
+                    OutputType::Value(_) => quote! {
+                        ::std::result::Result::Ok::<_, #crate_name::ServerError>(
+                            self.#field_ident(ctx, #(#use_keys),*).await
+                        )
+                    },
+                    OutputType::Result(_) => quote! {
+                        self.#field_ident(ctx, #(#use_keys),*)
+                            .await.map_err(|err| ::std::convert::Into::<#crate_name::Error>::into(err)
+                            .into_server_error(ctx.item.pos))
+                    },
                 };
 
                 find_entities.push((
@@ -517,12 +516,12 @@ pub fn generate(
 
                     schema_args.push(quote! {
                         {
-                            let mut arg = #crate_name::registry::MetaInputValue::new(
-                                ::std::string::ToString::to_string(#name),
+                            let arg = #crate_name::registry::add_input_value(
+                                &mut field.args,
+                                #name,
                                 <#ty as #crate_name::InputType>::create_type_info(registry),
                             );
                             #(#arg_sets)*
-                            field.args.insert(::std::string::ToString::to_string(#name), arg);
                         }
                     });
 
@@ -644,32 +643,17 @@ pub fn generate(
                 schema_fields.push(quote! {
                     #(#cfg_attrs)*
                     {
-                        let mut field = #crate_name::registry::MetaField::new(
-                            ::std::string::ToString::to_string(#field_name),
+                        let field = #crate_name::registry::add_field(
+                            &mut fields,
+                            #field_name,
                             <#schema_ty as #crate_name::OutputType>::create_type_info(registry),
                         );
                         #(#schema_args)*
                         #(#field_sets)*
-                        fields.insert(::std::string::ToString::to_string(#field_name), field);
                     }
                 });
 
                 let field_ident = &method.sig.ident;
-                if is_async && let OutputType::Value(inner_ty) = &ty {
-                    let block = &method.block;
-                    let new_block = quote!({
-                        {
-                            ::std::result::Result::Ok(async move {
-                                let value:#inner_ty = #block;
-                                value
-                            }.await)
-                        }
-                    });
-                    method.block = syn::parse2::<Block>(new_block).expect("invalid block");
-                    method.sig.output =
-                        syn::parse2::<ReturnType>(quote! { -> #crate_name::Result<#inner_ty> })
-                            .expect("invalid result type");
-                }
 
                 let extract_params = params
                     .iter()
@@ -691,19 +675,31 @@ pub fn generate(
                 };
 
                 let resolve_body = if is_async {
-                    quote! {
-                        return #crate_name::resolver_utils::resolve_field_async(
-                            ctx,
-                            self.#field_ident(ctx, #(#use_params),*)
-                        )
-                        .await;
+                    let resolve_value = gen_resolve_field_value(&crate_name, quote!(&obj), false);
+                    match &ty {
+                        OutputType::Value(_) => quote! {
+                            let obj = self.#field_ident(ctx, #(#use_params),*).await;
+                            return #resolve_value;
+                        },
+                        OutputType::Result(_) => quote! {
+                            let obj = self.#field_ident(ctx, #(#use_params),*)
+                                .await
+                                .map_err(|err| {
+                                    ctx.set_error_path(
+                                        ::std::convert::Into::<#crate_name::Error>::into(err)
+                                            .into_server_error(ctx.item.pos),
+                                    )
+                                })?;
+                            return #resolve_value;
+                        },
                     }
                 } else {
+                    let resolve_value = gen_resolve_field_value(&crate_name, quote!(&obj), true);
                     match &ty {
                         OutputType::Value(_) => {
                             quote! {
                                 let obj: #schema_ty = self.#field_ident(ctx, #(#use_params),*);
-                                return #crate_name::resolver_utils::resolve_simple_field_value(ctx, &obj).await;
+                                return #resolve_value;
                             }
                         }
                         OutputType::Result(_) => {
@@ -714,7 +710,7 @@ pub fn generate(
                                             .into_server_error(ctx.item.pos);
                                         ctx.set_error_path(err)
                                     })?;
-                                return #crate_name::resolver_utils::resolve_simple_field_value(ctx, &obj).await;
+                                return #resolve_value;
                             }
                         }
                     }
@@ -750,7 +746,7 @@ pub fn generate(
     };
 
     find_entities.sort_by(|(a, _), (b, _)| b.cmp(a));
-    let find_entities_iter = find_entities.iter().map(|(_, code)| code);
+    let find_entities_iter: Vec<_> = find_entities.iter().map(|(_, code)| code).collect();
 
     if resolvers.is_empty() && create_entity_types.is_empty() {
         return Err(Error::new_spanned(
@@ -771,6 +767,34 @@ pub fn generate(
             quote!(::std::option::Option::Some(
                 ::std::vec![ ::std::string::ToString::to_string(#unresolvable_key)]
             ))
+        }
+    };
+
+    // Without entity resolvers, `find_entity` only validates the
+    // representation, which needs no state machine.
+    let find_entity = if find_entities.is_empty() {
+        quote! {
+            fn find_entity(
+                &self,
+                ctx: &#crate_name::Context<'_>,
+                params: &#crate_name::Value,
+            ) -> impl ::std::future::Future<Output = #crate_name::ServerResult<::std::option::Option<#crate_name::Value>>> + ::std::marker::Send {
+                ::std::future::ready(
+                    #crate_name::resolver_utils::find_entity_params(ctx, params)
+                        .map(|_| ::std::option::Option::None),
+                )
+            }
+        }
+    } else {
+        quote! {
+            async fn find_entity(&self, ctx: &#crate_name::Context<'_>, params: &#crate_name::Value) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
+                if let ::std::option::Option::Some((params, typename)) =
+                    #crate_name::resolver_utils::find_entity_params(ctx, params)?
+                {
+                    #(#find_entities_iter)*
+                }
+                ::std::result::Result::Ok(::std::option::Option::None)
+            }
         }
     };
 
@@ -835,6 +859,31 @@ pub fn generate(
 
     let resolve_field_resolver_match = generate_field_match(resolvers)?;
 
+    // A trait object's lifetime defaults differ between `impl dyn Trait` and
+    // `&'a dyn Trait`, so those keep the generic resolution path.
+    let (erased_impl, resolve_erased, collect_erased) = if is_trait_object(&item_impl.self_ty) {
+        (
+            quote!(),
+            quote! {
+                async fn resolve(
+                    &self,
+                    ctx: &#crate_name::ContextSelectionSet<'_>,
+                    _field: &#crate_name::Positioned<#crate_name::parser::types::Field>,
+                ) -> #crate_name::ServerResult<#crate_name::Value> {
+                    #resolve_container
+                }
+            },
+            quote!(),
+        )
+    } else {
+        gen_erased_container(
+            &crate_name,
+            &quote!(#self_ty),
+            &item_impl.generics,
+            object_args.serial,
+        )
+    };
+
     let expanded = if object_args.concretes.is_empty() {
         quote! {
             #item_impl
@@ -844,26 +893,36 @@ pub fn generate(
             const _: () = {
                 #[allow(clippy::all, clippy::pedantic, clippy::suspicious_else_formatting)]
                 #[allow(unused_braces, unused_variables, unused_parens, unused_mut)]
-                #boxed_trait
                 impl #impl_generics #crate_name::resolver_utils::ContainerType for #self_ty #where_clause {
-                    async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
-                        #resolve_field_resolver_match
-                        #(#flattened_resolvers)*
-                        ::std::result::Result::Ok(::std::option::Option::None)
+                    #collect_erased
+
+                    // One boxed async block resolves every field. The erased
+                    // container boxes fields through `resolve_field_boxed`, so
+                    // generating it here avoids a second state machine per type
+                    // that would only box this one.
+                    fn resolve_field_boxed<'__field>(
+                        &'__field self,
+                        ctx: #crate_name::Context<'__field>,
+                    ) -> #crate_name::resolver_utils::BoxFieldResult<'__field> {
+                        ::std::boxed::Box::pin(async move {
+                            let ctx = &ctx;
+                            #resolve_field_resolver_match
+                            #(#flattened_resolvers)*
+                            ::std::result::Result::Ok(::std::option::Option::None)
+                        })
                     }
 
-                    async fn find_entity(&self, ctx: &#crate_name::Context<'_>, params: &#crate_name::Value) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
-                        if let ::std::option::Option::Some((params, typename)) =
-                            #crate_name::resolver_utils::find_entity_params(ctx, params)?
-                        {
-                            #(#find_entities_iter)*
-                        }
-                        ::std::result::Result::Ok(::std::option::Option::None)
+                    fn resolve_field<'__field>(
+                        &'__field self,
+                        ctx: &'__field #crate_name::Context<'__field>,
+                    ) -> impl ::std::future::Future<Output = #crate_name::ServerResult<::std::option::Option<#crate_name::Value>>> + ::std::marker::Send + '__field {
+                        #crate_name::resolver_utils::ContainerType::resolve_field_boxed(self, ::std::clone::Clone::clone(ctx))
                     }
+
+                    #find_entity
                 }
 
                 #[allow(clippy::all, clippy::pedantic)]
-                #boxed_trait
                 impl #impl_generics #crate_name::OutputType for #self_ty #where_clause {
                     fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
                         #gql_typename
@@ -887,14 +946,10 @@ pub fn generate(
                         ty
                     }
 
-                    async fn resolve(
-                        &self,
-                        ctx: &#crate_name::ContextSelectionSet<'_>,
-                        _field: &#crate_name::Positioned<#crate_name::parser::types::Field>
-                    ) -> #crate_name::ServerResult<#crate_name::Value> {
-                        #resolve_container
-                    }
+                    #resolve_erased
                 }
+
+                #erased_impl
 
                 impl #impl_generics #crate_name::ObjectType for #self_ty #where_clause {}
             };
@@ -965,7 +1020,6 @@ pub fn generate(
             };
 
             codes.push(quote! {
-                #boxed_trait
                 impl #def_bounds #crate_name::resolver_utils::ContainerType for #concrete_type {
                     async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
                         self.__internal_resolve_field(ctx).await
@@ -976,7 +1030,6 @@ pub fn generate(
                     }
                 }
 
-                #boxed_trait
                 impl #def_bounds #crate_name::OutputType for #concrete_type {
                     fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
                         ::std::borrow::Cow::Borrowed(#gql_typename)

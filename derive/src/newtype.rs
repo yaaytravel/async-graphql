@@ -5,12 +5,11 @@ use syn::Error;
 
 use crate::{
     args::{self, NewTypeName, RenameTarget},
-    utils::{GeneratorResult, gen_boxed_trait, get_crate_path, get_rustdoc, visible_fn},
+    utils::{GeneratorResult, gen_ready_resolve, get_crate_path, get_rustdoc, visible_fn},
 };
 
 pub fn generate(newtype_args: &args::NewType) -> GeneratorResult<TokenStream> {
     let crate_name = get_crate_path(&newtype_args.crate_path, newtype_args.internal);
-    let boxed_trait = gen_boxed_trait(&crate_name);
     let ident = &newtype_args.ident;
     let (impl_generics, ty_generics, where_clause) = newtype_args.generics.split_for_impl();
     let inaccessible = newtype_args.inaccessible;
@@ -69,6 +68,8 @@ pub fn generate(newtype_args: &args::NewType) -> GeneratorResult<TokenStream> {
         quote! { <#inner_ty as #crate_name::InputType>::create_type_info(registry) }
     };
 
+    let ready_resolve =
+        gen_ready_resolve(&crate_name, quote!(#crate_name::ScalarType::to_value(self)));
     let expanded = quote! {
         #[allow(clippy::all, clippy::pedantic)]
         impl #impl_generics #crate_name::ScalarType for #ident #ty_generics #where_clause {
@@ -120,7 +121,6 @@ pub fn generate(newtype_args: &args::NewType) -> GeneratorResult<TokenStream> {
         }
 
         #[allow(clippy::all, clippy::pedantic)]
-        #boxed_trait
         impl #impl_generics #crate_name::OutputType for #ident #ty_generics #where_clause {
             fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
                 #type_name
@@ -130,13 +130,11 @@ pub fn generate(newtype_args: &args::NewType) -> GeneratorResult<TokenStream> {
                 #create_type_info
             }
 
-            async fn resolve(
-                &self,
-                _: &#crate_name::ContextSelectionSet<'_>,
-                _field: &#crate_name::Positioned<#crate_name::parser::types::Field>
-            ) -> #crate_name::ServerResult<#crate_name::Value> {
-                Ok(#crate_name::ScalarType::to_value(self))
+            fn resolve_now(&self) -> ::std::option::Option<#crate_name::Value> {
+                ::std::option::Option::Some(#crate_name::ScalarType::to_value(self))
             }
+
+            #ready_resolve
         }
     };
 
